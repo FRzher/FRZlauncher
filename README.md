@@ -60,7 +60,7 @@
 
 ### Установка зависимостей
 ```bash
-git clone https://github.com/ВАШ_НИК/FRZlauncher.git
+git clone https://github.com/FRzher/FRZlauncher.git
 cd FRZlauncher
 npm install
 ```
@@ -90,5 +90,16 @@ cargo test
 
 Проект распространяется под лицензией [MIT](LICENSE).
 Вы можете свободно использовать, модифицировать и распространять данный код.
+
+---
+
+## ⚖️ Правовая информация (Legal Disclaimer)
+
+> **НЕ ЯВЛЯЕТСЯ ОФИЦИАЛЬНЫМ ПРОДУКТОМ MINECRAFT. НЕ ОДОБРЕНО И НЕ СВЯЗАНО С MOJANG ИЛИ MICROSOFT.**  
+> **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
+
+- «Minecraft» является зарегистрированным товарным знаком компании **Mojang Synergies AB / Microsoft Corporation**.
+- **FRZlauncher** — это независимый сторонний проект с открытым исходным кодом. Разработчики лаунчера никак не связаны с Mojang AB, Microsoft Corporation или их аффилированными лицами, не одобряются ими и не спонсируются ими.
+- Все товарные знаки, названия игр, логотипы и бренды принадлежат их законным правообладателям.
 
 <p align="center">Made with ❤️ for the Minecraft Community</p>
