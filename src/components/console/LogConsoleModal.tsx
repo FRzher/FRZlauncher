@@ -1,5 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
-import { X, Terminal, Copy, Trash2, AlertTriangle, Check, ArrowDown } from "lucide-react";
+import {
+  X,
+  Terminal,
+  Copy,
+  Trash2,
+  AlertTriangle,
+  Check,
+  ArrowDown,
+  Wrench,
+  CheckCircle2,
+  Sparkles,
+} from "lucide-react";
 import { useLaunchStore } from "../../store/launchStore";
 import { useInstanceStore } from "../../store/instanceStore";
 
@@ -11,16 +22,22 @@ export const LogConsoleModal: React.FC = () => {
     logs,
     statuses,
     clearLogs,
+    crashDiagnoses,
+    isRepairing,
+    autoRepairInstance,
   } = useLaunchStore();
 
   const instances = useInstanceStore((s) => s.instances);
   const [autoScroll, setAutoScroll] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [repairResult, setRepairResult] = useState<string | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
   const activeInstance = instances.find((i) => i.id === activeConsoleInstanceId);
   const currentLogs = activeConsoleInstanceId ? logs[activeConsoleInstanceId] || [] : [];
   const currentStatus = activeConsoleInstanceId ? statuses[activeConsoleInstanceId] : undefined;
+  const currentDiagnosis = activeConsoleInstanceId ? crashDiagnoses[activeConsoleInstanceId] : undefined;
+  const repairingThis = activeConsoleInstanceId ? isRepairing[activeConsoleInstanceId] : false;
 
   useEffect(() => {
     if (autoScroll && logContainerRef.current) {
@@ -35,6 +52,17 @@ export const LogConsoleModal: React.FC = () => {
     await navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleRepair = async () => {
+    if (!activeConsoleInstanceId) return;
+    setRepairResult(null);
+    try {
+      const res = await autoRepairInstance(activeConsoleInstanceId);
+      setRepairResult(res.message);
+    } catch (err: unknown) {
+      setRepairResult(`Не удалось устранить ошибку: ${err}`);
+    }
   };
 
   const getLogColor = (level: string) => {
@@ -67,17 +95,19 @@ export const LogConsoleModal: React.FC = () => {
                     className={`text-[10px] px-2 py-0.5 rounded-full font-mono uppercase font-bold border ${
                       currentStatus.state === "running"
                         ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                        : currentStatus.state === "starting"
+                        ? "bg-amber-500/15 text-amber-400 border-amber-500/30 animate-pulse"
                         : currentStatus.state === "crashed"
-                        ? "bg-red-500/15 text-red-400 border-red-500/30 animate-pulse"
+                        ? "bg-red-500/15 text-red-400 border-red-500/30"
                         : "bg-indigo-500/15 text-indigo-400 border-indigo-500/30"
                     }`}
                   >
-                    {currentStatus.state}
+                    {currentStatus.state === "starting" ? "Загрузка" : currentStatus.state}
                   </span>
                 )}
               </div>
               <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                {currentStatus?.message || "Streaming live process output..."}
+                {currentStatus?.message || "Потоковый вывод игрового процесса..."}
               </div>
             </div>
           </div>
@@ -91,25 +121,25 @@ export const LogConsoleModal: React.FC = () => {
                   ? "bg-indigo-500/15 text-indigo-300 border-indigo-500/30"
                   : "bg-white/[0.04] text-slate-400 border-white/[0.08] hover:text-white"
               }`}
-              title="Toggle auto-scroll"
+              title="Переключить автопрокрутку"
             >
               <ArrowDown className="w-3.5 h-3.5" />
-              <span>Auto-scroll</span>
+              <span>Автоскролл</span>
             </button>
 
             <button
               onClick={handleCopyLog}
               className="px-2.5 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 border border-white/[0.08] text-xs font-medium flex items-center gap-1.5 transition-colors"
-              title="Copy all logs"
+              title="Скопировать весь лог"
             >
               {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copied ? "Copied" : "Copy Log"}</span>
+              <span>{copied ? "Скопировано" : "Копировать"}</span>
             </button>
 
             <button
               onClick={() => clearLogs(activeConsoleInstanceId)}
               className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.08] border border-white/[0.08] transition-colors"
-              title="Clear logs"
+              title="Очистить консоль"
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -123,19 +153,60 @@ export const LogConsoleModal: React.FC = () => {
           </div>
         </div>
 
-        {/* Crash Diagnostic Banner */}
+        {/* Rich Crash Diagnostic Banner with 1-Click Auto Repair */}
         {currentStatus?.state === "crashed" && (
-          <div className="bg-red-500/15 border-b border-red-500/30 p-3.5 flex items-start gap-3 text-xs flex-shrink-0 animate-in slide-in-from-top duration-200">
-            <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <div className="font-bold text-red-300 mb-0.5">Game Process Terminated</div>
-              <div className="text-red-200/90 font-mono text-[11px] leading-relaxed">
-                {currentStatus.message}
+          <div className="bg-gradient-to-r from-red-950/80 via-[#180d12] to-[#120a14] border-b border-red-500/30 p-4 flex flex-col gap-2.5 text-xs flex-shrink-0 animate-in slide-in-from-top duration-200">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-red-500/20 border border-red-500/40 flex items-center justify-center text-red-400 shrink-0 mt-0.5">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="font-bold text-red-200 text-sm flex items-center gap-2">
+                    <span>
+                      {currentDiagnosis?.title || "Процесс игры аварийно завершился"}
+                    </span>
+                    {currentDiagnosis?.cause_type && (
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-mono uppercase">
+                        {currentDiagnosis.cause_type}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-red-300/90 text-xs mt-1 leading-relaxed">
+                    {currentDiagnosis?.description || currentStatus.message}
+                  </div>
+                  {currentDiagnosis?.suggested_fix && (
+                    <div className="text-emerald-300/90 text-[11px] mt-1.5 flex items-center gap-1.5 bg-emerald-950/30 border border-emerald-500/20 px-2.5 py-1.5 rounded-lg">
+                      <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>{currentDiagnosis.suggested_fix}</span>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="text-[10px] text-red-300/70 mt-1">
-                Tip: If this is a Java version error, check the Settings tab or verify your JDK configuration.
+
+              {/* Auto Repair Button */}
+              <div className="shrink-0 flex flex-col items-end gap-1.5">
+                <button
+                  onClick={handleRepair}
+                  disabled={repairingThis}
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-500 hover:from-amber-400 hover:to-emerald-400 text-black font-black text-xs flex items-center gap-2 shadow-lg shadow-emerald-500/20 active:scale-95 transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  {repairingThis ? (
+                    <span className="w-3.5 h-3.5 border-2 border-black/40 border-t-black rounded-full animate-spin" />
+                  ) : (
+                    <Wrench className="w-3.5 h-3.5 fill-current" />
+                  )}
+                  <span>{repairingThis ? "Устранение..." : "⚡ Устранить сбой"}</span>
+                </button>
               </div>
             </div>
+
+            {repairResult && (
+              <div className="text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg flex items-center gap-2 animate-fade-in">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{repairResult}</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -146,7 +217,7 @@ export const LogConsoleModal: React.FC = () => {
         >
           {currentLogs.length === 0 ? (
             <div className="h-full flex items-center justify-center text-slate-600 italic">
-              Waiting for process output...
+              Ожидание вывода процесса игры...
             </div>
           ) : (
             currentLogs.map((entry, idx) => (

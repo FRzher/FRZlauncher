@@ -12,7 +12,7 @@ use crate::models::{
     AuthProvider, DownloadProgressPayload, GameLogEntry, LaunchStatus, LoaderType,
 };
 use crate::services::{
-    ChecksumType, DiscordService, Downloader, ElyByService, InstanceManager, JavaDetector,
+    ChecksumType, CrashRepairService, DiscordService, Downloader, ElyByService, InstanceManager, JavaDetector,
     JvmOptimizer, KeyringService, ManifestService, ModrinthService,
 };
 
@@ -45,6 +45,7 @@ pub struct Launcher {
     elyby_service: Arc<ElyByService>,
     pub discord_service: Arc<DiscordService>,
     pub modrinth_service: Arc<ModrinthService>,
+    pub crash_repair_service: Arc<CrashRepairService>,
     running_processes: Arc<Mutex<HashMap<String, u32>>>,
     pub game_process_state: GameProcessState,
 }
@@ -60,6 +61,7 @@ impl Launcher {
         elyby_service: Arc<ElyByService>,
         discord_service: Arc<DiscordService>,
         modrinth_service: Arc<ModrinthService>,
+        crash_repair_service: Arc<CrashRepairService>,
         game_process_state: GameProcessState,
     ) -> Self {
         Self {
@@ -72,6 +74,7 @@ impl Launcher {
             elyby_service,
             discord_service,
             modrinth_service,
+            crash_repair_service,
             running_processes: Arc::new(Mutex::new(HashMap::new())),
             game_process_state,
         }
@@ -239,7 +242,7 @@ impl Launcher {
         let libraries_dir = self.instance_manager.cache_dir().join("libraries");
 
         struct LibDownloadTask {
-            url: String,
+            urls: Vec<String>,
             path: PathBuf,
             sha1: Option<String>,
             name: String,
@@ -258,8 +261,13 @@ impl Launcher {
                 if let Some(ref artifact) = downloads.artifact {
                     let lib_path = libraries_dir.join(&artifact.path);
                     if !lib_path.exists() {
+                        let dl_urls = ManifestService::resolve_library_download_urls(
+                            &lib.name,
+                            &artifact.path,
+                            Some(&artifact.url),
+                        );
                         download_tasks.push(LibDownloadTask {
-                            url: artifact.url.clone(),
+                            urls: dl_urls,
                             path: lib_path.clone(),
                             sha1: Some(artifact.sha1.clone()),
                             name: lib.name.clone(),
@@ -306,8 +314,13 @@ impl Launcher {
                     if let Some(artifact) = native_artifact {
                         let native_path = libraries_dir.join(&artifact.path);
                         if !native_path.exists() {
+                            let dl_urls = ManifestService::resolve_library_download_urls(
+                                &lib.name,
+                                &artifact.path,
+                                Some(&artifact.url),
+                            );
                             download_tasks.push(LibDownloadTask {
-                                url: artifact.url.clone(),
+                                urls: dl_urls,
                                 path: native_path.clone(),
                                 sha1: Some(artifact.sha1.clone()),
                                 name: format!("{} (natives)", lib.name),
@@ -319,7 +332,7 @@ impl Launcher {
             }
         }
 
-        // 6. Handle Modloader Libraries (Fabric, Forge, etc.)
+        // 6. Handle Modloader Libraries (Fabric, Forge, NeoForge, Quilt)
         let mut custom_minecraft_args: Option<String> = None;
         let mut custom_game_args: Option<Vec<serde_json::Value>> = None;
 
@@ -346,9 +359,13 @@ impl Launcher {
                     if let Some(rel_path) = ManifestService::maven_to_path(&lib.name) {
                         let lib_path = libraries_dir.join(&rel_path);
                         if !lib_path.exists() {
-                            let url = format!("{}/{}", lib.url.trim_end_matches('/'), rel_path);
+                            let dl_urls = ManifestService::resolve_library_download_urls(
+                                &lib.name,
+                                &rel_path,
+                                Some(&lib.url),
+                            );
                             download_tasks.push(LibDownloadTask {
-                                url,
+                                urls: dl_urls,
                                 path: lib_path.clone(),
                                 sha1: None,
                                 name: lib.name.clone(),
@@ -358,6 +375,107 @@ impl Launcher {
                     }
                 }
                 fabric_profile.main_class
+            }
+            LoaderType::Quilt => {
+                self.emit_status(
+                    &app,
+                    instance_id,
+                    "downloading",
+                    "Разрешение компонентов Quilt Loader...",
+                    Some(65.0),
+                );
+                let loader_version = instance
+                    .loader_version
+                    .as_deref()
+                    .unwrap_or("0.27.0");
+
+                let quilt_profile = self
+                    .manifest_service
+                    .get_quilt_profile(&instance.game_version, loader_version)
+                    .await?;
+
+                for lib in &quilt_profile.libraries {
+                    if let Some(rel_path) = ManifestService::maven_to_path(&lib.name) {
+                        let lib_path = libraries_dir.join(&rel_path);
+                        if !lib_path.exists() {
+                            let dl_urls = ManifestService::resolve_library_download_urls(
+                                &lib.name,
+                                &rel_path,
+                                Some(&lib.url),
+                            );
+                            download_tasks.push(LibDownloadTask {
+                                urls: dl_urls,
+                                path: lib_path.clone(),
+                                sha1: None,
+                                name: lib.name.clone(),
+                            });
+                        }
+                        classpath_entries.push(lib_path);
+                    }
+                }
+                quilt_profile.main_class
+            }
+            LoaderType::NeoForge => {
+                self.emit_status(
+                    &app,
+                    instance_id,
+                    "downloading",
+                    "Разрешение компонентов NeoForge...",
+                    Some(65.0),
+                );
+                let neoforge_profile = self
+                    .manifest_service
+                    .get_neoforge_profile(&instance.game_version, instance.loader_version.as_deref())
+                    .await?;
+
+                for lib in &neoforge_profile.libraries {
+                    if !ManifestService::is_library_allowed_on_windows(lib.rules.as_deref()) {
+                        continue;
+                    }
+
+                    if let Some(ref downloads) = lib.downloads {
+                        if let Some(ref artifact) = downloads.artifact {
+                            let lib_path = libraries_dir.join(&artifact.path);
+                            if !lib_path.exists() {
+                                let dl_urls = ManifestService::resolve_library_download_urls(
+                                    &lib.name,
+                                    &artifact.path,
+                                    Some(&artifact.url),
+                                );
+                                download_tasks.push(LibDownloadTask {
+                                    urls: dl_urls,
+                                    path: lib_path.clone(),
+                                    sha1: Some(artifact.sha1.clone()),
+                                    name: lib.name.clone(),
+                                });
+                            }
+                            classpath_entries.push(lib_path);
+                        }
+                    } else if let Some(rel_path) = ManifestService::maven_to_path(&lib.name) {
+                        let lib_path = libraries_dir.join(&rel_path);
+                        if !lib_path.exists() {
+                            let dl_urls = ManifestService::resolve_library_download_urls(
+                                &lib.name,
+                                &rel_path,
+                                lib.url.as_deref(),
+                            );
+                            download_tasks.push(LibDownloadTask {
+                                urls: dl_urls,
+                                path: lib_path.clone(),
+                                sha1: None,
+                                name: lib.name.clone(),
+                            });
+                        }
+                        classpath_entries.push(lib_path);
+                    }
+                }
+
+                custom_minecraft_args = neoforge_profile.minecraft_arguments;
+                if let Some(ref args) = neoforge_profile.arguments {
+                    custom_game_args = Some(args.game.clone());
+                }
+
+                neoforge_profile.main_class
             }
             LoaderType::Forge => {
                 self.emit_status(
@@ -391,8 +509,13 @@ impl Launcher {
                                         dl_url = format!("https://maven.minecraftforge.net/{}", artifact.path);
                                     }
                                 }
+                                let dl_urls = ManifestService::resolve_library_download_urls(
+                                    &lib.name,
+                                    &artifact.path,
+                                    Some(&dl_url),
+                                );
                                 download_tasks.push(LibDownloadTask {
-                                    url: dl_url,
+                                    urls: dl_urls,
                                     path: lib_path.clone(),
                                     sha1: Some(artifact.sha1.clone()),
                                     name: lib.name.clone(),
@@ -429,8 +552,13 @@ impl Launcher {
                             if let Some(artifact) = native_artifact {
                                 let native_path = libraries_dir.join(&artifact.path);
                                 if !native_path.exists() {
+                                    let dl_urls = ManifestService::resolve_library_download_urls(
+                                        &lib.name,
+                                        &artifact.path,
+                                        Some(&artifact.url),
+                                    );
                                     download_tasks.push(LibDownloadTask {
-                                        url: artifact.url.clone(),
+                                        urls: dl_urls,
                                         path: native_path.clone(),
                                         sha1: Some(artifact.sha1.clone()),
                                         name: format!("{} (natives)", lib.name),
@@ -442,10 +570,13 @@ impl Launcher {
                     } else if let Some(rel_path) = ManifestService::maven_to_path(&lib.name) {
                         let lib_path = libraries_dir.join(&rel_path);
                         if !lib_path.exists() {
-                            let base_url = lib.url.as_deref().unwrap_or("https://maven.minecraftforge.net");
-                            let url = format!("{}/{}", base_url.trim_end_matches('/'), rel_path);
+                            let dl_urls = ManifestService::resolve_library_download_urls(
+                                &lib.name,
+                                &rel_path,
+                                lib.url.as_deref(),
+                            );
                             download_tasks.push(LibDownloadTask {
-                                url,
+                                urls: dl_urls,
                                 path: lib_path.clone(),
                                 sha1: None,
                                 name: lib.name.clone(),
@@ -468,10 +599,10 @@ impl Launcher {
         // Add client jar to classpath
         classpath_entries.push(client_jar_path);
 
-        // Execute concurrent downloads with Semaphore
+        // Execute concurrent downloads with Semaphore and multi-mirror retries
         let total_items = download_tasks.len();
         if total_items > 0 {
-            let semaphore = Arc::new(Semaphore::new(12));
+            let semaphore = Arc::new(Semaphore::new(16));
             let completed = Arc::new(AtomicUsize::new(0));
 
             let mut join_handles = Vec::new();
@@ -489,9 +620,16 @@ impl Launcher {
                         None => ChecksumType::None,
                     };
 
-                    let _ = dl
-                        .download_file(&task.url, &task.path, checksum, None, None)
-                        .await;
+                    let mut success = false;
+                    for u in &task.urls {
+                        if dl.download_file(u, &task.path, checksum.clone(), None, None).await.is_ok() {
+                            success = true;
+                            break;
+                        }
+                    }
+                    if !success && !task.urls.is_empty() {
+                        tracing::warn!("Не удалось скачать библиотеку: {}", task.name);
+                    }
 
                     let c = comp.fetch_add(1, Ordering::SeqCst) + 1;
                     let pct = 5.0 + (c as f32 / total_items as f32) * 50.0;
@@ -664,64 +802,74 @@ impl Launcher {
                 .await;
         }
 
-        // Parse asset index and download missing asset objects concurrently
-        if let Ok(content) = std::fs::read_to_string(&index_file) {
-            if let Ok(asset_index) = serde_json::from_str::<AssetIndexData>(&content) {
-                let mut asset_tasks = Vec::new();
-                let objects_dir = assets_dir.join("objects");
+        // Fast-path: Skip scanning thousands of asset files if already verified on disk
+        let verified_marker = assets_dir.join(format!("{}.verified", pkg.assets));
+        let objects_dir = assets_dir.join("objects");
+        let skip_asset_scan = verified_marker.exists() && objects_dir.exists();
 
-                for (_name, obj) in asset_index.objects {
-                    if obj.hash.len() >= 2 {
-                        let prefix = &obj.hash[..2];
-                        let obj_path = objects_dir.join(prefix).join(&obj.hash);
-                        if !obj_path.exists() {
-                            let url = format!("https://resources.download.minecraft.net/{}/{}", prefix, obj.hash);
-                            asset_tasks.push((url, obj_path, obj.hash));
+        if !skip_asset_scan {
+            if let Ok(content) = std::fs::read_to_string(&index_file) {
+                if let Ok(asset_index) = serde_json::from_str::<AssetIndexData>(&content) {
+                    let mut asset_tasks = Vec::new();
+
+                    for (_name, obj) in asset_index.objects {
+                        if obj.hash.len() >= 2 {
+                            let prefix = &obj.hash[..2];
+                            let obj_path = objects_dir.join(prefix).join(&obj.hash);
+                            let needs_download = !obj_path.exists()
+                                || obj_path.metadata().map(|m| m.len() == 0).unwrap_or(true);
+                            if needs_download {
+                                let url = format!("https://resources.download.minecraft.net/{}/{}", prefix, obj.hash);
+                                asset_tasks.push((url, obj_path, obj.hash));
+                            }
                         }
                     }
-                }
 
-                let total_assets = asset_tasks.len();
-                if total_assets > 0 {
-                    let sem = Arc::new(Semaphore::new(20));
-                    let completed = Arc::new(AtomicUsize::new(0));
-                    let mut handles = Vec::new();
+                    let total_assets = asset_tasks.len();
+                    if total_assets > 0 {
+                        let sem = Arc::new(Semaphore::new(24));
+                        let completed = Arc::new(AtomicUsize::new(0));
+                        let mut handles = Vec::new();
 
-                    for (url, path, hash) in asset_tasks {
-                        let permit_sem = sem.clone();
-                        let dl = self.downloader.clone();
-                        let comp = completed.clone();
-                        let app_handle = app.clone();
-                        let inst_id = instance_id.to_string();
+                        for (url, path, hash) in asset_tasks {
+                            let permit_sem = sem.clone();
+                            let dl = self.downloader.clone();
+                            let comp = completed.clone();
+                            let app_handle = app.clone();
+                            let inst_id = instance_id.to_string();
 
-                        let h = tokio::spawn(async move {
-                            let _permit = permit_sem.acquire().await.unwrap();
-                            let _ = dl.download_file(&url, &path, ChecksumType::Sha1(hash), None, None).await;
+                            let h = tokio::spawn(async move {
+                                let _permit = permit_sem.acquire().await.unwrap();
+                                let _ = dl.download_file(&url, &path, ChecksumType::Sha1(hash), None, None).await;
 
-                            let c = comp.fetch_add(1, Ordering::SeqCst) + 1;
-                            if c % 15 == 0 || c == total_assets {
-                                let pct = 55.0 + (c as f32 / total_assets as f32) * 35.0;
-                                let _ = app_handle.emit(
-                                    "download-progress-granular",
-                                    DownloadProgressPayload {
-                                        instance_id: inst_id,
-                                        stage: "Загрузка ассетов игры".to_string(),
-                                        current_file: format!("Ассеты: {} / {}", c, total_assets),
-                                        completed_items: c,
-                                        total_items: total_assets,
-                                        downloaded_bytes: 0,
-                                        total_bytes: 0,
-                                        percentage: pct,
-                                    },
-                                );
-                            }
-                        });
-                        handles.push(h);
+                                let c = comp.fetch_add(1, Ordering::SeqCst) + 1;
+                                if c % 25 == 0 || c == total_assets {
+                                    let pct = 55.0 + (c as f32 / total_assets as f32) * 35.0;
+                                    let _ = app_handle.emit(
+                                        "download-progress-granular",
+                                        DownloadProgressPayload {
+                                            instance_id: inst_id,
+                                            stage: "Загрузка ассетов игры".to_string(),
+                                            current_file: format!("Ассеты: {} / {}", c, total_assets),
+                                            completed_items: c,
+                                            total_items: total_assets,
+                                            downloaded_bytes: 0,
+                                            total_bytes: 0,
+                                            percentage: pct,
+                                        },
+                                    );
+                                }
+                            });
+                            handles.push(h);
+                        }
+
+                        for h in handles {
+                            let _ = h.await;
+                        }
                     }
 
-                    for h in handles {
-                        let _ = h.await;
-                    }
+                    // Save verified marker so subsequent launches start instantly
+                    let _ = std::fs::write(&verified_marker, "verified");
                 }
             }
         }
@@ -912,8 +1060,8 @@ impl Launcher {
         self.emit_status(
             &app,
             instance_id,
-            "running",
-            "Игра запущена. Логирование процесса...",
+            "starting",
+            "Запуск JVM и загрузка Minecraft...",
             Some(100.0),
         );
 
@@ -936,8 +1084,11 @@ impl Launcher {
         let running_map = self.running_processes.clone();
         let game_proc_state = self.game_process_state.clone();
         let discord_serv = self.discord_service.clone();
+        let crash_repair = self.crash_repair_service.clone();
         let inst_name = instance.name.clone();
         let inst_ver = instance.game_version.clone();
+        let inst_loader = instance.loader_type.clone();
+        let instance_dir_clone = instance_dir.clone();
 
         tokio::spawn(async move {
             #[cfg(target_os = "windows")]
@@ -995,28 +1146,12 @@ impl Launcher {
                 Ok(mut child) => {
                     let pid = child.id().unwrap_or(0);
                     running_map.lock().await.insert(inst_id_string.clone(), pid);
-                    let _ = discord_serv.set_in_game(&inst_name, &inst_ver).await;
 
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
 
                     let _ = app_clone.emit(
-                        "game-status-changed",
-                        serde_json::json!({
-                            "running": true,
-                            "instance_id": &inst_id_string,
-                            "pid": pid,
-                        }),
-                    );
-                    let _ = app_clone.emit(
                         "game-launched",
-                        serde_json::json!({
-                            "instance_id": &inst_id_string,
-                            "pid": pid,
-                        }),
-                    );
-                    let _ = app_clone.emit(
-                        "game-started",
                         serde_json::json!({
                             "instance_id": &inst_id_string,
                             "pid": pid,
@@ -1026,20 +1161,84 @@ impl Launcher {
                         "launch-status",
                         LaunchStatus {
                             instance_id: inst_id_string.clone(),
-                            state: "running".to_string(),
-                            message: "В игре".to_string(),
+                            state: "starting".to_string(),
+                            message: "Инициализация Minecraft и загрузка модов...".to_string(),
                             progress: None,
                         },
                     );
 
+                    let window_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let recent_logs = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
                     let app_out = app_clone.clone();
                     let id_out = inst_id_string.clone();
+                    let window_ready_out = window_ready.clone();
+                    let discord_out = discord_serv.clone();
+                    let inst_name_out = inst_name.clone();
+                    let inst_ver_out = inst_ver.clone();
+                    let recent_logs_out = recent_logs.clone();
+
                     let stdout_handle = tokio::spawn(async move {
                         if let Some(stream) = stdout {
                             let mut reader = BufReader::new(stream).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
                                 let level = parse_log_level(&line);
                                 let now = chrono::Utc::now().timestamp_millis();
+
+                                {
+                                    if let Ok(mut logs) = recent_logs_out.lock() {
+                                        if logs.len() > 600 {
+                                            logs.remove(0);
+                                        }
+                                        logs.push(line.clone());
+                                    }
+                                }
+
+                                if !window_ready_out.load(std::sync::atomic::Ordering::SeqCst)
+                                    && is_window_ready_signal(&line)
+                                {
+                                    if window_ready_out
+                                        .compare_exchange(
+                                            false,
+                                            true,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        )
+                                        .is_ok()
+                                    {
+                                        let _ = app_out.emit(
+                                            "game-window-ready",
+                                            serde_json::json!({
+                                                "instance_id": &id_out,
+                                                "pid": pid,
+                                            }),
+                                        );
+                                        let _ = app_out.emit(
+                                            "game-status-changed",
+                                            serde_json::json!({
+                                                "running": true,
+                                                "instance_id": &id_out,
+                                                "pid": pid,
+                                            }),
+                                        );
+                                        let _ = app_out.emit(
+                                            "launch-status",
+                                            LaunchStatus {
+                                                instance_id: id_out.clone(),
+                                                state: "running".to_string(),
+                                                message: "В игре".to_string(),
+                                                progress: None,
+                                            },
+                                        );
+                                        let disc = discord_out.clone();
+                                        let iname = inst_name_out.clone();
+                                        let iver = inst_ver_out.clone();
+                                        tokio::spawn(async move {
+                                            let _ = disc.set_in_game(&iname, &iver).await;
+                                        });
+                                    }
+                                }
+
                                 let _ = app_out.emit(
                                     "game-log",
                                     GameLogEntry {
@@ -1055,12 +1254,23 @@ impl Launcher {
 
                     let app_err = app_clone.clone();
                     let id_err = inst_id_string.clone();
+                    let recent_logs_err = recent_logs.clone();
                     let stderr_handle = tokio::spawn(async move {
                         if let Some(stream) = stderr {
                             let mut reader = BufReader::new(stream).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
                                 let level = parse_log_level(&line);
                                 let now = chrono::Utc::now().timestamp_millis();
+
+                                {
+                                    if let Ok(mut logs) = recent_logs_err.lock() {
+                                        if logs.len() > 600 {
+                                            logs.remove(0);
+                                        }
+                                        logs.push(line.clone());
+                                    }
+                                }
+
                                 let _ = app_err.emit(
                                     "game-log",
                                     GameLogEntry {
@@ -1076,9 +1286,97 @@ impl Launcher {
 
                     *game_proc_state.0.lock().await = Some(child);
 
+                    // Active Window Visibility Watcher:
+                    // Continuously poll Windows OS window manager for the actual Minecraft HWND window.
+                    // Flips to "В игре" ONLY when the game window is genuinely visible on the screen.
+                    let window_ready_watcher = window_ready.clone();
+                    let app_watcher = app_clone.clone();
+                    let discord_watcher = discord_serv.clone();
+                    let id_watcher = inst_id_string.clone();
+                    let name_watcher = inst_name.clone();
+                    let ver_watcher = inst_ver.clone();
+                    let active_proc_for_watcher = game_proc_state.clone();
+
+                    tokio::spawn(async move {
+                        let start_instant = std::time::Instant::now();
+                        loop {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+
+                            if window_ready_watcher.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+
+                            let is_still_alive = {
+                                let mut lock = active_proc_for_watcher.0.lock().await;
+                                if let Some(child_ref) = lock.as_mut() {
+                                    child_ref.try_wait().ok().flatten().is_none()
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if !is_still_alive {
+                                break;
+                            }
+
+                            let elapsed = start_instant.elapsed();
+
+                            #[cfg(target_os = "windows")]
+                            let is_visible = win_window::is_process_window_visible(pid);
+                            #[cfg(not(target_os = "windows"))]
+                            let is_visible = false;
+
+                            let should_mark_ready = is_visible || elapsed >= std::time::Duration::from_secs(35);
+
+                            if should_mark_ready
+                                && window_ready_watcher
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                            {
+                                let _ = app_watcher.emit(
+                                    "game-window-ready",
+                                    serde_json::json!({
+                                        "instance_id": &id_watcher,
+                                        "pid": pid,
+                                    }),
+                                );
+                                let _ = app_watcher.emit(
+                                    "game-status-changed",
+                                    serde_json::json!({
+                                        "running": true,
+                                        "instance_id": &id_watcher,
+                                        "pid": pid,
+                                    }),
+                                );
+                                let _ = app_watcher.emit(
+                                    "launch-status",
+                                    LaunchStatus {
+                                        instance_id: id_watcher.clone(),
+                                        state: "running".to_string(),
+                                        message: "В игре".to_string(),
+                                        progress: None,
+                                    },
+                                );
+                                let _ = discord_watcher.set_in_game(&name_watcher, &ver_watcher).await;
+                                break;
+                            }
+                        }
+                    });
+
                     let active_proc_ref = game_proc_state.clone();
                     let app_exit = app_clone.clone();
                     let inst_exit = inst_id_string.clone();
+                    let recent_logs_exit = recent_logs.clone();
+                    let crash_repair_exit = crash_repair.clone();
+                    let inst_ver_exit = inst_ver.clone();
+                    let inst_loader_exit = inst_loader.clone();
+                    let instance_dir_exit = instance_dir_clone.clone();
+
                     tokio::spawn(async move {
                         let mut exit_code: Option<i32> = None;
                         loop {
@@ -1147,12 +1445,30 @@ impl Launcher {
                                 },
                             );
                         } else {
+                            let logs_snapshot = recent_logs_exit.lock().map(|l| l.clone()).unwrap_or_default();
+                            let diagnosis = crash_repair_exit.analyze_crash(
+                                &inst_exit,
+                                &instance_dir_exit,
+                                exit_code,
+                                &logs_snapshot,
+                                &inst_ver_exit,
+                                &inst_loader_exit,
+                            );
+
+                            let _ = app_exit.emit(
+                                "game-crash-diagnosed",
+                                serde_json::json!({
+                                    "instance_id": &inst_exit,
+                                    "diagnosis": &diagnosis,
+                                }),
+                            );
+
                             let _ = app_exit.emit(
                                 "launch-status",
                                 LaunchStatus {
                                     instance_id: inst_exit.clone(),
                                     state: "crashed".to_string(),
-                                    message: format!("Процесс игры завершился с кодом ошибки {}.", exit_code.unwrap_or(-1)),
+                                    message: format!("Сбой игры: {}", diagnosis.title),
                                     progress: None,
                                 },
                             );
@@ -1270,6 +1586,67 @@ fn parse_log_level(line: &str) -> String {
     } else {
         "INFO".to_string()
     }
+}
+
+#[cfg(target_os = "windows")]
+pub mod win_window {
+    type HWND = *mut std::ffi::c_void;
+    type BOOL = i32;
+    type LPARAM = isize;
+    type DWORD = u32;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(lpEnumFunc: extern "system" fn(HWND, LPARAM) -> BOOL, lParam: LPARAM) -> BOOL;
+        fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
+        fn IsWindowVisible(hWnd: HWND) -> BOOL;
+        fn GetWindowTextLengthW(hWnd: HWND) -> i32;
+    }
+
+    struct WindowFinder {
+        target_pid: u32,
+        found_visible: bool,
+    }
+
+    extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let finder = &mut *(lparam as *mut WindowFinder);
+            let mut pid: DWORD = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == finder.target_pid && IsWindowVisible(hwnd) != 0 {
+                let title_len = GetWindowTextLengthW(hwnd);
+                if title_len > 0 {
+                    finder.found_visible = true;
+                    return 0;
+                }
+            }
+            1
+        }
+    }
+
+    pub fn is_process_window_visible(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        let mut finder = WindowFinder {
+            target_pid: pid,
+            found_visible: false,
+        };
+        unsafe {
+            EnumWindows(enum_proc, &mut finder as *mut WindowFinder as LPARAM);
+        }
+        finder.found_visible
+    }
+}
+
+pub fn is_window_ready_signal(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("openal initialized")
+        || l.contains("sound engine started")
+        || l.contains("sound engine loaded")
+        || (l.contains("created:") && (l.contains("texture") || l.contains("atlas")))
+        || l.contains("entering title screen")
+        || (l.contains("render thread") && (l.contains("window ready") || l.contains("surface") || l.contains("loaded")))
 }
 
 /// Optimize Minecraft options.txt for maximum FPS (500+ FPS)
@@ -1411,4 +1788,16 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_is_window_ready_signal() {
+        assert!(is_window_ready_signal("[12:00:00] [main/INFO]: OpenAL initialized."));
+        assert!(is_window_ready_signal("[12:00:00] [Render thread/INFO]: Created: 1024x1024x4 minecraft:textures/atlas/blocks.png-atlas"));
+        assert!(is_window_ready_signal("[12:00:00] [Render thread/INFO]: Sound engine started"));
+        assert!(!is_window_ready_signal("[12:00:00] [Render thread/INFO]: Backend library: LWJGL version 3.3.3-SNAPSHOT"));
+        assert!(!is_window_ready_signal("[12:00:00] [Client thread/INFO]: Setting user: Steve"));
+        assert!(!is_window_ready_signal("[12:00:00] [main/INFO]: Loading Minecraft 1.20.1 with Fabric Loader 0.16.0"));
+        assert!(!is_window_ready_signal("[12:00:00] [main/INFO]: SpongePowered MIXIN Subsystem Version=0.8.5"));
+    }
 }
+

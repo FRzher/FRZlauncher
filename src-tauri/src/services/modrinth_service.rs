@@ -24,10 +24,20 @@ pub struct MrpackIndex {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct MrpackEnv {
+    #[serde(default)]
+    pub client: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct MrpackFile {
     pub path: String,
     #[serde(default)]
     pub hashes: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub env: Option<MrpackEnv>,
     #[serde(default)]
     pub downloads: Vec<String>,
 }
@@ -875,7 +885,14 @@ impl ModrinthService {
         // Download modpack files
         let total_files = index.files.len();
         for (idx, f) in index.files.iter().enumerate() {
-            if let Some(dl_url) = f.downloads.first() {
+            // Skip server-only mods on client installations to avoid crashes
+            if let Some(ref env) = f.env {
+                if env.client.as_deref() == Some("unsupported") {
+                    continue;
+                }
+            }
+
+            if !f.downloads.is_empty() {
                 let dest = instance_dir.join(&f.path);
                 if let Some(parent) = dest.parent() {
                     let _ = fs::create_dir_all(parent);
@@ -904,7 +921,12 @@ impl ModrinthService {
                     );
                 }
 
-                let _ = self.downloader.download_file(dl_url, &dest, checksum, None, None).await;
+                // Try each mirror until one succeeds
+                for dl_url in &f.downloads {
+                    if self.downloader.download_file(dl_url, &dest, checksum.clone(), None, None).await.is_ok() {
+                        break;
+                    }
+                }
             }
         }
 

@@ -123,7 +123,7 @@ export interface GameLogEntry {
 
 export interface LaunchStatus {
   instance_id: string;
-  state: "ready" | "downloading" | "verifying" | "launching" | "running" | "crashed" | "exited";
+  state: "ready" | "downloading" | "verifying" | "launching" | "starting" | "running" | "crashed" | "exited";
   message: string;
   progress?: number;
 }
@@ -281,4 +281,52 @@ export interface UltraFpsBoostResult {
   tweaks_applied: string[];
   message: string;
 }
+
+export interface Friend {
+  id: string;
+  nickname: string;
+  note?: string | null;
+  favorite: boolean;
+  created_at: number;
+  last_seen?: number | null;
+  status: "online" | "offline" | "in_game";
+  current_server?: string | null;
+  avatar_url?: string | null;
+}
+
+export interface AddFriendRequest {
+  nickname: string;
+  note?: string | null;
+}
+
+export interface UpdateFriendRequest {
+  id: string;
+  nickname: string;
+  note?: string | null;
+  favorite: boolean;
+  status: "online" | "offline" | "in_game";
+}
+
+export interface CrashDiagnosis {
+  instance_id: string;
+  cause_type: string;
+  title: string;
+  description: string;
+  details: string;
+  suggested_fix: string;
+  can_auto_fix: bool_or_boolean;
+  offending_file?: string | null;
+  offending_arg?: string | null;
+  target_java_major?: number | null;
+}
+
+type bool_or_boolean = boolean;
+
+export interface AutoRepairResult {
+  success: boolean;
+  message: string;
+  actions_taken: string[];
+  can_relaunch: boolean;
+}
+
 

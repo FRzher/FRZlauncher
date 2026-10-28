@@ -383,6 +383,131 @@ impl ManifestService {
         versions.into_iter().next().ok_or_else(|| format!("Нет доступных версий Forge для {}", game_version))
     }
 
+    /// Fetch NeoForge Profile for launching
+    pub async fn get_neoforge_profile(
+        &self,
+        game_version: &str,
+        loader_version: Option<&str>,
+    ) -> Result<ForgeProfile, String> {
+        let versions_dir = self.cache_dir.join("versions");
+        let _ = fs::create_dir_all(&versions_dir);
+
+        let neoforge_version = if let Some(v) = loader_version {
+            if !v.trim().is_empty() {
+                v.trim().to_string()
+            } else {
+                self.resolve_cached_or_remote_neoforge_ver(game_version, &versions_dir).await?
+            }
+        } else {
+            self.resolve_cached_or_remote_neoforge_ver(game_version, &versions_dir).await?
+        };
+
+        let profile_path = versions_dir.join(format!("{}-neoforge-{}.json", game_version, neoforge_version));
+        if profile_path.exists() {
+            if let Ok(content) = fs::read_to_string(&profile_path) {
+                if let Ok(profile) = serde_json::from_str::<ForgeProfile>(&content) {
+                    return Ok(profile);
+                }
+            }
+        }
+
+        let installer_url = format!(
+            "https://maven.neoforged.net/releases/net/neoforged/neoforge/{}/neoforge-{}-installer.jar",
+            neoforge_version, neoforge_version
+        );
+        let bmcl_installer_url = format!(
+            "https://bmclapi2.bangbang93.com/neoforge/version/{}/download/installer.jar",
+            neoforge_version
+        );
+
+        let installer_bytes = match self.client.get(&installer_url).send().await {
+            Ok(resp) if resp.status().is_success() => resp.bytes().await.map_err(|e| e.to_string())?,
+            _ => {
+                let resp = self
+                    .client
+                    .get(&bmcl_installer_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Не удалось скачать установщик NeoForge: {}", e))?;
+                if !resp.status().is_success() {
+                    return Err(format!("NeoForge installer returned HTTP {}", resp.status()));
+                }
+                resp.bytes().await.map_err(|e| e.to_string())?
+            }
+        };
+
+        let reader = std::io::Cursor::new(installer_bytes);
+        let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("Ошибка чтения ZIP установщика NeoForge: {}", e))?;
+
+        let mut version_json_content = String::new();
+        let libraries_dir = self.cache_dir.join("libraries");
+
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = file.name().to_string();
+
+            if name == "version.json" {
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = file.read_to_string(&mut buf);
+                version_json_content = buf;
+            } else if let Some(stripped) = name.strip_prefix("maven/") {
+                if !file.is_dir() && !stripped.is_empty() {
+                    let dest = libraries_dir.join(stripped);
+                    if let Some(p) = dest.parent() {
+                        let _ = fs::create_dir_all(p);
+                    }
+                    if let Ok(mut out) = fs::File::create(&dest) {
+                        let _ = std::io::copy(&mut file, &mut out);
+                    }
+                }
+            }
+        }
+
+        if version_json_content.is_empty() {
+            return Err("version.json не найден внутри установщика NeoForge".to_string());
+        }
+
+        let _ = fs::write(&profile_path, &version_json_content);
+        let profile: ForgeProfile = serde_json::from_str(&version_json_content)
+            .map_err(|e| format!("Ошибка парсинга NeoForge version.json: {}", e))?;
+
+        Ok(profile)
+    }
+
+    async fn resolve_cached_or_remote_neoforge_ver(&self, game_version: &str, versions_dir: &Path) -> Result<String, String> {
+        let prefix = format!("{}-neoforge-", game_version);
+        if let Ok(entries) = fs::read_dir(versions_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix) && name.ends_with(".json") {
+                    let v = name.trim_start_matches(&prefix).trim_end_matches(".json");
+                    return Ok(v.to_string());
+                }
+            }
+        }
+        let versions = self.get_neoforge_versions(game_version).await?;
+        versions.into_iter().next().ok_or_else(|| format!("Нет доступных версий NeoForge для {}", game_version))
+    }
+
+    /// Fetch Quilt profile (with fallback to Fabric profile)
+    pub async fn get_quilt_profile(
+        &self,
+        game_version: &str,
+        loader_version: &str,
+    ) -> Result<FabricProfile, String> {
+        let url = format!("https://meta.quiltmc.org/v3/versions/loader/{}/{}/profile/json", game_version, loader_version);
+        if let Ok(resp) = self.client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(profile) = resp.json::<FabricProfile>().await {
+                    return Ok(profile);
+                }
+            }
+        }
+        // Fallback to Fabric
+        self.get_fabric_profile(game_version, loader_version).await
+    }
+
     /// Check if a library rule allows installation on Windows
     pub fn is_library_allowed_on_windows(rules: Option<&[Rule]>) -> bool {
         let rules = match rules {
@@ -424,5 +549,44 @@ impl ManifestService {
             "{}/{}/{}/{}-{}{}.jar",
             group, artifact, version, artifact, version, classifier
         ))
+    }
+
+    /// Resolve candidate download URLs for a Maven coordinate with multiple mirrors
+    pub fn resolve_library_download_urls(
+        lib_name: &str,
+        rel_path: &str,
+        custom_base_url: Option<&str>,
+    ) -> Vec<String> {
+        let mut urls = Vec::new();
+        if let Some(base) = custom_base_url {
+            let b = base.trim().trim_end_matches('/');
+            if !b.is_empty() {
+                urls.push(format!("{}/{}", b, rel_path));
+            }
+        }
+
+        if lib_name.starts_with("net.minecraft:") || lib_name.starts_with("org.lwjgl") || lib_name.starts_with("com.mojang") {
+            urls.push(format!("https://libraries.minecraft.net/{}", rel_path));
+            urls.push(format!("https://bmclapi2.bangbang93.com/maven/{}", rel_path));
+        } else if lib_name.starts_with("net.minecraftforge:") {
+            urls.push(format!("https://maven.minecraftforge.net/{}", rel_path));
+            urls.push(format!("https://bmclapi2.bangbang93.com/maven/{}", rel_path));
+        } else if lib_name.starts_with("net.neoforged:") {
+            urls.push(format!("https://maven.neoforged.net/releases/{}", rel_path));
+            urls.push(format!("https://bmclapi2.bangbang93.com/maven/{}", rel_path));
+        } else if lib_name.starts_with("net.fabricmc:") {
+            urls.push(format!("https://maven.fabricmc.net/{}", rel_path));
+        } else if lib_name.starts_with("org.quiltmc:") {
+            urls.push(format!("https://maven.quiltmc.org/repository/release/{}", rel_path));
+        }
+
+        // Standard fallbacks
+        urls.push(format!("https://libraries.minecraft.net/{}", rel_path));
+        urls.push(format!("https://repo1.maven.org/maven2/{}", rel_path));
+        urls.push(format!("https://maven.minecraftforge.net/{}", rel_path));
+        urls.push(format!("https://bmclapi2.bangbang93.com/maven/{}", rel_path));
+
+        urls.dedup();
+        urls
     }
 }

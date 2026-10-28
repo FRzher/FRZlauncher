@@ -1,5 +1,6 @@
-import { Layers, PackageSearch, Users, Settings, Plus, UserCircle, Sparkles, Bot } from "lucide-react";
+import { Layers, PackageSearch, Users, Settings, Plus, UserCircle, Sparkles, Bot, HeartHandshake } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
+import { useFriendStore } from "../../store/friendStore";
 import { PlayerAvatar } from "../common/PlayerSkinView";
 import { soundManager } from "../../utils/sound";
 import { YouTubeIcon } from "../common/YouTubeIcon";
@@ -10,6 +11,7 @@ interface SidebarProps {
   onTabChange: (tab: string) => void;
   onOpenCreate: () => void;
   onOpenAccounts: () => void;
+  onOpenFriends?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -17,8 +19,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onTabChange,
   onOpenCreate,
   onOpenAccounts,
+  onOpenFriends,
 }) => {
   const activeAccount = useAuthStore((state) => state.activeAccount);
+  const friendsCount = useFriendStore((state) => state.friends.length);
 
   const openChannel = async () => {
     try {
@@ -34,6 +38,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: "modpacks", label: "Модпаки", icon: Sparkles },
     { id: "mods", label: "Каталог модов", icon: PackageSearch },
     { id: "ai_builder", label: "Подбор модов", icon: Bot },
+    { id: "friends", label: "Друзья", icon: HeartHandshake },
     { id: "accounts", label: "Аккаунты", icon: Users },
     { id: "settings", label: "Настройки", icon: Settings },
   ];
@@ -59,7 +64,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
             return (
               <button
                 key={item.id}
-                onClick={() => onTabChange(item.id)}
+                onClick={() => {
+                  soundManager.playClick();
+                  if (item.id === "friends" && onOpenFriends) {
+                    onOpenFriends();
+                  } else {
+                    onTabChange(item.id);
+                  }
+                }}
                 className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-150 cursor-pointer ${
                   isActive
                     ? "btn-accent-subtle shadow-sm"
@@ -70,6 +82,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <Icon className={`w-4 h-4 ${isActive ? "text-accent" : "text-slate-400"}`} />
                   <span className={isActive ? "font-bold text-white" : ""}>{item.label}</span>
                 </div>
+                {item.id === "friends" && friendsCount > 0 && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 font-bold border border-purple-500/30">
+                    {friendsCount}
+                  </span>
+                )}
               </button>
             );
           })}

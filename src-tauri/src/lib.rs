@@ -4,9 +4,9 @@ pub mod services;
 
 use std::sync::Arc;
 use services::{
-    AiModService, DiscordService, Downloader, ElyByService, InstanceManager, JavaDetector, JvmOptimizer,
-    KeyringService, Launcher, ManifestService, MicrosoftAuthService, MinecraftInsideService,
-    ModrinthService,
+    AiModService, CrashRepairService, DiscordService, Downloader, ElyByService, FriendService,
+    InstanceManager, JavaDetector, JvmOptimizer, KeyringService, Launcher, ManifestService,
+    MicrosoftAuthService, MinecraftInsideService, ModrinthService,
 };
 
 pub struct AppState {
@@ -23,6 +23,8 @@ pub struct AppState {
     pub minecraft_inside_service: Arc<MinecraftInsideService>,
     pub discord_service: Arc<DiscordService>,
     pub ai_mod_service: Arc<AiModService>,
+    pub friend_service: Arc<FriendService>,
+    pub crash_repair_service: Arc<CrashRepairService>,
     pub game_process_state: services::GameProcessState,
 }
 
@@ -31,7 +33,7 @@ pub fn run() {
     let base_dir = InstanceManager::default_dir();
     let instance_manager = Arc::new(InstanceManager::new(base_dir.clone()));
     let network_settings = instance_manager.load_network_settings();
-    let keyring_service = Arc::new(KeyringService::new(base_dir));
+    let keyring_service = Arc::new(KeyringService::new(base_dir.clone()));
     let downloader = Arc::new(Downloader::with_settings(&network_settings));
     let jvm_optimizer = Arc::new(JvmOptimizer::new());
     let manifest_service = Arc::new(ManifestService::new(
@@ -44,6 +46,12 @@ pub fn run() {
     let modrinth_service = Arc::new(ModrinthService::with_settings(downloader.clone(), &network_settings));
     let minecraft_inside_service = Arc::new(MinecraftInsideService::new());
     let discord_service = Arc::new(DiscordService::new(None));
+    let friend_service = Arc::new(FriendService::new(base_dir.clone()));
+    let crash_repair_service = Arc::new(CrashRepairService::new(
+        instance_manager.clone(),
+        java_detector.clone(),
+        modrinth_service.clone(),
+    ));
     let ai_mod_service = Arc::new(AiModService::new(
         modrinth_service.clone(),
         instance_manager.clone(),
@@ -60,6 +68,7 @@ pub fn run() {
         elyby_service.clone(),
         discord_service.clone(),
         modrinth_service.clone(),
+        crash_repair_service.clone(),
         game_process_state.clone(),
     ));
 
@@ -79,6 +88,8 @@ pub fn run() {
         minecraft_inside_service,
         discord_service,
         ai_mod_service,
+        friend_service,
+        crash_repair_service,
         game_process_state: game_process_state.clone(),
     };
 
@@ -168,6 +179,15 @@ pub fn run() {
             commands::set_discord_view,
             commands::toggle_discord_rpc,
             commands::get_discord_rpc_status,
+            // Friend commands
+            commands::get_friends,
+            commands::add_friend,
+            commands::remove_friend,
+            commands::update_friend,
+            commands::toggle_favorite_friend,
+            // Crash & Auto-repair commands
+            commands::diagnose_crash,
+            commands::auto_repair_instance,
         ])
         .run(tauri::generate_context!())
         .expect("Error while running FRZlauncher application");

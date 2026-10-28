@@ -5,15 +5,18 @@ import {
   DownloadProgressPayload,
   GameExitedPayload,
   GameLogEntry,
-  GameStartedPayload,
   GameStatusChangedPayload,
   LaunchStatus,
+  CrashDiagnosis,
+  AutoRepairResult,
 } from "../types";
 
 interface LaunchState {
   statuses: Record<string, LaunchStatus>;
   granularProgress: Record<string, DownloadProgressPayload>;
   logs: Record<string, GameLogEntry[]>;
+  crashDiagnoses: Record<string, CrashDiagnosis>;
+  isRepairing: Record<string, boolean>;
   isConsoleOpen: boolean;
   activeConsoleInstanceId: string | null;
   isGameRunning: boolean;
@@ -24,6 +27,7 @@ interface LaunchState {
   openConsole: (instanceId: string) => void;
   closeConsole: () => void;
   clearLogs: (instanceId: string) => void;
+  autoRepairInstance: (instanceId: string) => Promise<AutoRepairResult>;
   initListeners: () => Promise<() => void>;
 }
 
@@ -31,6 +35,8 @@ export const useLaunchStore = create<LaunchState>((set) => ({
   statuses: {},
   granularProgress: {},
   logs: {},
+  crashDiagnoses: {},
+  isRepairing: {},
   isConsoleOpen: false,
   activeConsoleInstanceId: null,
   isGameRunning: false,
@@ -58,18 +64,8 @@ export const useLaunchStore = create<LaunchState>((set) => ({
         const newProgress = { ...state.granularProgress };
         delete newProgress[id];
         return {
-          isGameRunning: true,
           runningInstanceId: id,
           granularProgress: newProgress,
-          statuses: {
-            ...state.statuses,
-            [id]: {
-              instance_id: id,
-              state: "running",
-              message: "В игре",
-              progress: undefined,
-            },
-          },
         };
       });
     } catch (err: unknown) {
@@ -158,6 +154,42 @@ export const useLaunchStore = create<LaunchState>((set) => ({
     }));
   },
 
+  autoRepairInstance: async (instanceId: string) => {
+    set((state) => ({
+      isRepairing: { ...state.isRepairing, [instanceId]: true },
+    }));
+    try {
+      const result = await invoke<AutoRepairResult>("auto_repair_instance", {
+        instanceId,
+      });
+      set((state) => {
+        const newDiagnoses = { ...state.crashDiagnoses };
+        if (result.success) {
+          delete newDiagnoses[instanceId];
+        }
+        return {
+          isRepairing: { ...state.isRepairing, [instanceId]: false },
+          crashDiagnoses: newDiagnoses,
+          statuses: {
+            ...state.statuses,
+            [instanceId]: {
+              instance_id: instanceId,
+              state: result.success ? "ready" : "crashed",
+              message: result.message,
+              progress: undefined,
+            },
+          },
+        };
+      });
+      return result;
+    } catch (err: unknown) {
+      set((state) => ({
+        isRepairing: { ...state.isRepairing, [instanceId]: false },
+      }));
+      throw err;
+    }
+  },
+
   initListeners: async () => {
     // 1. Process Lifecycle State Changed (True Single Source of Truth)
     const unlistenGameStatus = await listen<GameStatusChangedPayload>(
@@ -199,7 +231,7 @@ export const useLaunchStore = create<LaunchState>((set) => ({
               };
             } else {
               for (const k of Object.keys(newStatuses)) {
-                if (newStatuses[k].state === "running") {
+                if (newStatuses[k].state === "running" || newStatuses[k].state === "starting") {
                   newStatuses[k] = {
                     instance_id: k,
                     state: isClean ? "ready" : "crashed",
@@ -254,45 +286,58 @@ export const useLaunchStore = create<LaunchState>((set) => ({
       }
     );
 
-    const handleGameLaunched = (payload: any) => {
+    const unlistenLaunched = await listen<any>("game-launched", (event) => {
       set((state) => {
-        const instId = payload?.instance_id || state.activeConsoleInstanceId;
+        const instId = event.payload?.instance_id || state.activeConsoleInstanceId;
         const newProgress = { ...state.granularProgress };
         const newStatuses = { ...state.statuses };
         if (instId) {
           delete newProgress[instId];
           newStatuses[instId] = {
             instance_id: instId,
-            state: "running",
-            message: "В игре",
+            state: "starting",
+            message: "Инициализация Minecraft и загрузка модов...",
             progress: undefined,
           };
-        } else {
-          for (const k of Object.keys(newStatuses)) {
-            delete newProgress[k];
-            newStatuses[k] = {
-              ...newStatuses[k],
-              state: "running",
-              message: "В игре",
-              progress: undefined,
-            };
-          }
         }
         return {
-          isGameRunning: true,
           runningInstanceId: instId || state.runningInstanceId,
           granularProgress: newProgress,
           statuses: newStatuses,
         };
       });
-    };
-
-    const unlistenLaunched = await listen<any>("game-launched", (event) => {
-      handleGameLaunched(event.payload);
     });
 
-    const unlistenStarted = await listen<GameStartedPayload>("game-started", (event) => {
-      handleGameLaunched(event.payload);
+    const unlistenWindowReady = await listen<any>("game-window-ready", (event) => {
+      set((state) => {
+        const instId = event.payload?.instance_id || state.runningInstanceId;
+        const newStatuses = { ...state.statuses };
+        if (instId) {
+          newStatuses[instId] = {
+            instance_id: instId,
+            state: "running",
+            message: "В игре",
+            progress: undefined,
+          };
+        }
+        return {
+          isGameRunning: true,
+          runningInstanceId: instId || state.runningInstanceId,
+          statuses: newStatuses,
+        };
+      });
+    });
+
+    const unlistenCrash = await listen<any>("game-crash-diagnosed", (event) => {
+      const { instance_id, diagnosis } = event.payload || {};
+      if (instance_id && diagnosis) {
+        set((state) => ({
+          crashDiagnoses: {
+            ...state.crashDiagnoses,
+            [instance_id]: diagnosis,
+          },
+        }));
+      }
     });
 
     const unlistenExited = await listen<GameExitedPayload>("game-exited", (event) => {
@@ -343,7 +388,8 @@ export const useLaunchStore = create<LaunchState>((set) => ({
       unlistenStatus();
       unlistenGranular();
       unlistenLaunched();
-      unlistenStarted();
+      unlistenWindowReady();
+      unlistenCrash();
       unlistenExited();
       unlistenLog();
     };

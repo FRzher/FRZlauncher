@@ -231,8 +231,50 @@ pub async fn apply_ultra_fps_boost(
         _ => vec!["sodium", "lithium", "ferrite-core"],
     };
 
+    // 1. Purge or disable conflicting mods in mods_dir
+    let _ = std::fs::create_dir_all(&mods_dir);
+    if let Ok(entries) = std::fs::read_dir(&mods_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let fname = entry.file_name().to_string_lossy().to_lowercase();
+                if fname.ends_with(".jar") {
+                    if fname.contains("optifine") {
+                        let disabled_name = format!("{}.disabled", entry.file_name().to_string_lossy());
+                        let _ = std::fs::rename(&path, mods_dir.join(disabled_name));
+                    } else if l_type == "forge" && fname.contains("rubidium") {
+                        let disabled_name = format!("{}.disabled", entry.file_name().to_string_lossy());
+                        let _ = std::fs::rename(&path, mods_dir.join(disabled_name));
+                    }
+                }
+            }
+        }
+    }
+
+    // Read current existing mods to avoid downloading duplicates
+    let existing_jars: Vec<String> = std::fs::read_dir(&mods_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_file())
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_lowercase()))
+                .filter(|n| n.ends_with(".jar"))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut installed_mods = Vec::new();
     for slug in opt_slugs {
+        let slug_clean = slug.replace('-', "");
+        let already_present = existing_jars.iter().any(|j| {
+            let j_clean = j.replace('-', "").replace('_', "");
+            j_clean.contains(&slug_clean)
+        });
+
+        if already_present {
+            continue;
+        }
+
         match state
             .modrinth_service
             .install_project_with_dependencies(&mods_dir, slug, &g_version, l_type)
@@ -260,8 +302,8 @@ pub async fn apply_ultra_fps_boost(
 
     if inst.memory.max_mb < optimal_ram {
         inst.memory.max_mb = optimal_ram;
-        inst.memory.min_mb = 1024;
     }
+    inst.memory.min_mb = 512.min(inst.memory.max_mb);
 
     state.instance_manager.update_instance(inst.clone())?;
 

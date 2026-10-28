@@ -90,9 +90,8 @@ impl JvmOptimizer {
             let safe_min = memory.min_mb.min(safe_max).min(512);
             (safe_max, safe_min)
         } else {
-            // IMPORTANT: For stutter-free gameplay on 64-bit, -Xms can equal -Xmx.
             let max = memory.max_mb;
-            let min = if gc_preset.eq_ignore_ascii_case("fps_boost") || gc_preset.eq_ignore_ascii_case("aikar") {
+            let min = if gc_preset.eq_ignore_ascii_case("aikar") {
                 max
             } else {
                 memory.min_mb.min(memory.max_mb)
@@ -125,25 +124,24 @@ impl JvmOptimizer {
                             "-XX:+UseG1GC",
                             "-XX:G1NewSizePercent=25",
                             "-XX:G1MaxNewSizePercent=40",
-                        "-XX:G1ReservePercent=20",
-                        "-XX:MaxGCPauseMillis=50",
-                        "-XX:G1HeapRegionSize=16M",
-                        "-XX:G1MixedGCCountTarget=4",
-                        "-XX:InitiatingHeapOccupancyPercent=45",
-                        "-XX:G1MixedGCLiveThresholdPercent=90",
-                        "-XX:G1RSetUpdatingPauseTimePercent=5",
-                        "-XX:SurvivorRatio=32",
-                        "-XX:+ParallelRefProcEnabled",
-                        "-XX:+AlwaysPreTouch",
-                        "-XX:+DisableExplicitGC",
-                        "-XX:+PerfDisableSharedMem",
-                        "-XX:+UseStringDeduplication",
-                        "-Dio.netty.allocator.type=pooled",
-                    ]
-                    .iter()
-                    .map(|s| s.to_string()),
-                );
-            }
+                            "-XX:G1ReservePercent=20",
+                            "-XX:MaxGCPauseMillis=50",
+                            "-XX:G1MixedGCCountTarget=4",
+                            "-XX:InitiatingHeapOccupancyPercent=45",
+                            "-XX:G1MixedGCLiveThresholdPercent=90",
+                            "-XX:G1RSetUpdatingPauseTimePercent=5",
+                            "-XX:SurvivorRatio=32",
+                            "-XX:+ParallelRefProcEnabled",
+                            "-XX:+OptimizeStringConcat",
+                            "-XX:+DisableExplicitGC",
+                            "-XX:+PerfDisableSharedMem",
+                            "-XX:+UseStringDeduplication",
+                            "-Dio.netty.allocator.type=pooled",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string()),
+                    );
+                }
             "aikar" => {
                 args.extend(
                     [

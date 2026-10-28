@@ -19,6 +19,7 @@ import {
   Zap,
   Check,
   Star,
+  Wrench,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useInstanceStore } from "../../store/instanceStore";
@@ -53,6 +54,9 @@ export const InstanceGrid: React.FC<InstanceGridProps> = ({
     isGameRunning,
     runningInstanceId,
     openConsole,
+    crashDiagnoses,
+    isRepairing,
+    autoRepairInstance,
   } = useLaunchStore();
   const activeAccount = useAuthStore((s) => s.activeAccount);
   const density = useCustomizationStore((s) => s.density);
@@ -188,6 +192,34 @@ export const InstanceGrid: React.FC<InstanceGridProps> = ({
       );
     }
 
+    if (status?.state === "starting") {
+      return (
+        <div className="flex items-center gap-1.5 w-full">
+          <button
+            onClick={() => {
+              soundManager.playClick();
+              openConsole(instId);
+            }}
+            className="flex-1 py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 bg-amber-500/20 border border-amber-500/40 text-amber-200 hover:bg-amber-500/30 transition-all cursor-pointer shadow-sm"
+            title="Инициализация Minecraft и загрузка модов..."
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+            <span className="truncate">ЗАГРУЗКА...</span>
+          </button>
+          <button
+            onClick={() => {
+              soundManager.playError();
+              killActiveGame();
+            }}
+            className="py-2.5 px-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 bg-red-600/80 hover:bg-red-500 text-white transition-all cursor-pointer active:scale-95"
+            title="Завершить процесс игры"
+          >
+            <Square className="w-3.5 h-3.5 fill-current" />
+          </button>
+        </div>
+      );
+    }
+
     if (!status || status.state === "ready" || status.state === "exited") {
       return (
         <button
@@ -209,8 +241,31 @@ export const InstanceGrid: React.FC<InstanceGridProps> = ({
     }
 
     if (status.state === "crashed") {
+      const isRep = isRepairing[instId];
+      const diagnosis = crashDiagnoses[instId];
       return (
         <div className="flex items-center gap-1.5 w-full">
+          <button
+            onClick={async () => {
+              soundManager.playClick();
+              try {
+                const res = await autoRepairInstance(instId);
+                alert(`⚡ Авторемонт: ${res.message}\n• Действия:\n${res.actions_taken.join("\n")}`);
+              } catch (err: unknown) {
+                alert(`Не удалось устранить ошибку: ${err}`);
+              }
+            }}
+            disabled={isRep}
+            className="flex-1 py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 bg-gradient-to-r from-amber-500 to-emerald-500 hover:from-amber-400 hover:to-emerald-400 text-black shadow-md shadow-emerald-500/20 transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50"
+            title={diagnosis ? `Причина: ${diagnosis.title}\nРешение: ${diagnosis.suggested_fix}` : "Автоматически устранить сбой"}
+          >
+            {isRep ? (
+              <span className="w-3.5 h-3.5 border-2 border-black/40 border-t-black rounded-full animate-spin" />
+            ) : (
+              <Wrench className="w-3.5 h-3.5 fill-current" />
+            )}
+            <span>{isRep ? "РЕМОНТ..." : "⚡ ПОЧИНИТЬ"}</span>
+          </button>
           <button
             onClick={() => {
               if (!activeAccount) {
@@ -221,19 +276,17 @@ export const InstanceGrid: React.FC<InstanceGridProps> = ({
               soundManager.playLaunch();
               launchInstance(instId);
             }}
-            className="flex-1 py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 bg-red-600 hover:bg-red-500 text-white transition-all active:scale-[0.98] cursor-pointer"
+            className="py-2.5 px-2.5 rounded-xl font-semibold text-xs flex items-center justify-center bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 transition-all border border-white/10 cursor-pointer"
             title="Повторить запуск игры"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            <span>ПЕРЕЗАПУСТИТЬ</span>
           </button>
           <button
             onClick={() => openConsole(instId)}
-            className="py-2.5 px-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-1 bg-white/[0.04] hover:bg-white/[0.08] text-red-300 transition-all border border-red-500/20 cursor-pointer"
+            className="py-2.5 px-2.5 rounded-xl font-semibold text-xs flex items-center justify-center gap-1 bg-white/[0.04] hover:bg-white/[0.08] text-red-300 transition-all border border-red-500/20 cursor-pointer"
             title="Открыть лог ошибки"
           >
             <AlertCircle className="w-3.5 h-3.5 text-red-400" />
-            <span>Лог</span>
           </button>
         </div>
       );

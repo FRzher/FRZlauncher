@@ -11,18 +11,21 @@ import { ModsModal } from "./components/instances/ModsModal";
 import { ModBrowserView } from "./components/mods/ModBrowserView";
 import { ModpackBrowserModal } from "./components/modpacks/ModpackBrowserModal";
 import { AiModBuilderModal } from "./components/modpacks/AiModBuilderModal";
+import { FriendsModal } from "./components/friends/FriendsModal";
 import { SplashScreen } from "./components/common/SplashScreen";
 import { AnimatedBackground } from "./components/common/AnimatedBackground";
 import { useInstanceStore } from "./store/instanceStore";
 import { useSystemStore } from "./store/systemStore";
 import { useAuthStore } from "./store/authStore";
 import { useLaunchStore } from "./store/launchStore";
+import { useFriendStore } from "./store/friendStore";
 import { useCustomizationStore, BG_PRESETS } from "./store/customizationStore";
 
 export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState("instances");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isAccountsOpen, setIsAccountsOpen] = useState(false);
+  const [isFriendsOpen, setIsFriendsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isModpacksOpen, setIsModpacksOpen] = useState(false);
   const [isAiBuilderOpen, setIsAiBuilderOpen] = useState(false);
@@ -32,6 +35,7 @@ export const App: React.FC = () => {
   const fetchInstances = useInstanceStore((s) => s.fetchInstances);
   const fetchSystemSpecs = useSystemStore((s) => s.fetchSystemSpecs);
   const fetchAccounts = useAuthStore((s) => s.fetchAccounts);
+  const fetchFriends = useFriendStore((s) => s.fetchFriends);
   const initLaunchListeners = useLaunchStore((s) => s.initListeners);
 
   const bgTheme = useCustomizationStore((s) => s.bgTheme);
@@ -45,6 +49,7 @@ export const App: React.FC = () => {
     fetchInstances();
     fetchSystemSpecs();
     fetchAccounts();
+    fetchFriends();
 
     let unlisten: (() => void) | undefined;
     initLaunchListeners().then((cleanup) => {
@@ -65,6 +70,8 @@ export const App: React.FC = () => {
     invoke("set_discord_view", { view: tab }).catch(() => {});
     if (tab === "accounts") {
       setIsAccountsOpen(true);
+    } else if (tab === "friends") {
+      setIsFriendsOpen(true);
     } else if (tab === "settings") {
       setIsSettingsOpen(true);
     } else if (tab === "modpacks") {
@@ -133,6 +140,7 @@ export const App: React.FC = () => {
           onTabChange={handleTabChange}
           onOpenCreate={() => setIsCreateOpen(true)}
           onOpenAccounts={() => setIsAccountsOpen(true)}
+          onOpenFriends={() => setIsFriendsOpen(true)}
         />
 
         {/* Dynamic Content View */}
@@ -174,6 +182,10 @@ export const App: React.FC = () => {
       <AccountModal
         isOpen={isAccountsOpen}
         onClose={() => setIsAccountsOpen(false)}
+      />
+      <FriendsModal
+        isOpen={isFriendsOpen}
+        onClose={() => setIsFriendsOpen(false)}
       />
       <SettingsModal
         isOpen={isSettingsOpen}
