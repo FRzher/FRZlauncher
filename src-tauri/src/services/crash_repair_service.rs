@@ -84,10 +84,67 @@ impl CrashRepairService {
             }
         }
 
+        let fabric_log_path = instance_dir.join("fabricloader.log");
+        if fabric_log_path.exists() {
+            if let Ok(content) = fs::read_to_string(&fabric_log_path) {
+                full_log.push_str("\n--- FABRICLOADER.LOG ---\n");
+                full_log.push_str(&content);
+            }
+        }
+
         full_log.push_str("\n");
         full_log.push_str(&latest_log_content);
         full_log.push_str("\n");
         full_log.push_str(&crash_report_content);
+
+        // --- Cause: Fabric Loader / Sinytra Connector missing dependency or Mod resolution failed ---
+        if full_log.contains("Mod resolution failed") || full_log.contains("HARD_DEP_NO_CANDIDATE") {
+            let mut offending_file = None;
+            let re_cand = Regex::new(r"HARD_DEP_NO_CANDIDATE\s+([a-zA-Z0-9_\-]+)").unwrap();
+            let dep_name = if let Some(caps) = re_cand.captures(&full_log) {
+                caps.get(1).map(|m| m.as_str().to_string())
+            } else {
+                None
+            };
+
+            let mods_dir = instance_dir.join("mods");
+            if let Some(ref d_name) = dep_name {
+                if let Ok(entries) = fs::read_dir(&mods_dir) {
+                    for entry in entries.flatten() {
+                        let fname = entry.file_name().to_string_lossy().to_string();
+                        if fname.to_lowercase().contains(&d_name.to_lowercase()) && fname.ends_with(".jar") {
+                            offending_file = Some(fname);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let desc = if let Some(ref m) = offending_file {
+                format!("Мод «{}» не может запуститься, так как для него отсутствуют обязательные библиотеки.", m)
+            } else if let Some(ref d) = dep_name {
+                format!("В сборке отсутствует обязательный мод/зависимость «{}».", d)
+            } else {
+                "Сборка содержит моды с неразрешенными зависимостями.".to_string()
+            };
+
+            return CrashDiagnosis {
+                instance_id: instance_id.to_string(),
+                cause_type: "missing_dependency".to_string(),
+                title: "Отсутствуют зависимости для модов".to_string(),
+                description: desc,
+                details: "Один или несколько модов требуют дополнительные библиотеки (например, Fabric API / Forgified Fabric API) для работы.".to_string(),
+                suggested_fix: if offending_file.is_some() {
+                    "Автоматически отключить несовместимый мод, чтобы запустить игру.".to_string()
+                } else {
+                    "Установите недостающие библиотеки или удалите несовместимый мод из папки mods.".to_string()
+                },
+                can_auto_fix: offending_file.is_some(),
+                offending_file,
+                offending_arg: None,
+                target_java_major: None,
+            };
+        }
 
         // --- Cause 1: 32-bit Java or Incompatible JVM arguments / Memory overflow ---
         if full_log.contains("The specified size exceeds the maximum representable size")
@@ -655,6 +712,32 @@ mod tests {
         assert_eq!(diagnosis.cause_type, "mod_crash");
         assert!(diagnosis.title.contains("OptiFine"));
         assert!(diagnosis.can_auto_fix);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_crash_analyzer_detects_fabric_missing_dependencies() {
+        let temp_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".temp")
+            .join(format!("frz_test_crash_dep_{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let inst_mgr = Arc::new(InstanceManager::new(temp_dir.clone()));
+        let java_det = Arc::new(JavaDetector::new());
+        let downloader = Arc::new(crate::services::Downloader::new());
+        let modrinth = Arc::new(ModrinthService::new(downloader));
+
+        let service = CrashRepairService::new(inst_mgr, java_det, modrinth);
+
+        // Put a fabricloader.log
+        let fabric_log = "[18:28:43] [WARN] [FabricLoader/Resolution]: Mod resolution failed\n[18:28:43] [INFO] [FabricLoader/Resolution]: Immediate reason: [HARD_DEP_NO_CANDIDATE enhancedblockentities 0.9+1.20 {depends fabric @ [*]}]";
+        fs::write(temp_dir.join("fabricloader.log"), fabric_log).unwrap();
+
+        let diagnosis = service.analyze_crash("inst1", &temp_dir, Some(1), &[], "1.20.1", &LoaderType::Forge);
+        assert_eq!(diagnosis.cause_type, "missing_dependency");
+        assert!(diagnosis.title.contains("зависимости"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

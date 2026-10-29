@@ -104,7 +104,7 @@ impl InstanceManager {
             java_path: None,
             memory: req.memory.unwrap_or_default(),
             custom_jvm_args: Vec::new(),
-            gc_preset: req.gc_preset.unwrap_or_else(|| "fps_boost".to_string()),
+            gc_preset: req.gc_preset.unwrap_or_else(|| "aikar".to_string()),
             created_at: now,
             last_played: None,
             play_time_seconds: 0,

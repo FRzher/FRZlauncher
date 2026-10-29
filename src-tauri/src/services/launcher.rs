@@ -765,65 +765,6 @@ impl Launcher {
             }
         }
 
-        // If Fabric or Quilt and mods are present, ensure Fabric API is installed
-        if instance.loader_type == LoaderType::Fabric || instance.loader_type == LoaderType::Quilt {
-            let mods_dir = instance_dir.join("mods");
-            if mods_dir.exists() {
-                let has_mods = std::fs::read_dir(&mods_dir)
-                    .map(|entries| {
-                        entries.filter_map(|e| e.ok()).any(|e| {
-                            let p = e.path();
-                            p.is_file() && p.extension().map(|ext| ext == "jar").unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false);
-
-                if has_mods {
-                    let has_fabric_api = std::fs::read_dir(&mods_dir)
-                        .map(|entries| {
-                            entries.filter_map(|e| e.ok()).any(|e| {
-                                let n = e.file_name().to_string_lossy().to_lowercase();
-                                n.contains("fabric-api") || n.contains("fabric_api")
-                            })
-                        })
-                        .unwrap_or(false);
-
-                    if !has_fabric_api {
-                        self.emit_status(
-                            &app,
-                            instance_id,
-                            "downloading",
-                            "Автоустановка Fabric API для установленных модов...",
-                            Some(54.0),
-                        );
-                        match self
-                            .modrinth_service
-                            .install_project_with_dependencies(&mods_dir, "fabric-api", &instance.game_version, "fabric")
-                            .await
-                        {
-                            Ok(res) => {
-                                let _ = app.emit(
-                                    "game-log",
-                                    crate::models::GameLogEntry {
-                                        instance_id: instance_id.to_string(),
-                                        line: format!(
-                                            "[FRZlauncher] Автоматически установлен Fabric API ({}) для поддержки Fabric модов.",
-                                            res.filename
-                                        ),
-                                        level: "INFO".to_string(),
-                                        timestamp: chrono::Utc::now().timestamp_millis(),
-                                    },
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("Не удалось автоматически загрузить Fabric API: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // If Vanilla loader but mods directory has jar files, notify user that Vanilla cannot load mods
         if instance.loader_type == LoaderType::Vanilla {
             let mods_dir = instance_dir.join("mods");
@@ -1019,7 +960,6 @@ impl Launcher {
         // Networking and system optimizations
         jvm_args.push("-Djava.net.preferIPv4Stack=true".to_string());
         jvm_args.push("-Dio.netty.allocator.type=pooled".to_string());
-        jvm_args.push("-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=false".to_string());
 
         // Add modular opens for modern JVMs (Java 17, 21, 25)
         if java_install.major_version >= 17 {
@@ -1209,9 +1149,6 @@ impl Launcher {
         final_args.push(main_class);
         final_args.extend(game_args);
 
-        // Auto-tune options.txt for maximum FPS (disables vsync lock, sets uncapped FPS, optimal render distance)
-        auto_tune_options_for_max_fps(&instance_dir);
-
         // 10. Spawn Java Process
         self.emit_status(
             &app,
@@ -1283,19 +1220,10 @@ impl Launcher {
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
 
-            // Performance environment variables
-            cmd.env("__NV_PRIME_RENDER_OFFLOAD", "1");
-            cmd.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
-            cmd.env("DRI_PRIME", "1");
-            cmd.env("SHIM_MCCOMPAT", "0x80000000");
-            cmd.env("__GL_THREADED_OPTIMIZATIONS", "1");
-            cmd.env("__GL_YIELD", "NOTHING");
-            cmd.env("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
-
             #[cfg(target_os = "windows")]
             {
-                // CREATE_NO_WINDOW (0x08000000) | HIGH_PRIORITY_CLASS (0x00000080) for Minecraft process
-                cmd.creation_flags(0x08000000 | 0x00000080);
+                // Set HIGH_PRIORITY_CLASS (0x00000080) for Minecraft process without suppressing GUI window
+                cmd.creation_flags(0x00000080);
             }
 
             match cmd.spawn() {
@@ -1482,7 +1410,7 @@ impl Launcher {
                             #[cfg(not(target_os = "windows"))]
                             let is_visible = false;
 
-                            let should_mark_ready = is_visible || elapsed >= std::time::Duration::from_secs(35);
+                            let should_mark_ready = is_visible || elapsed >= std::time::Duration::from_secs(120);
 
                             if should_mark_ready
                                 && window_ready_watcher
@@ -1929,7 +1857,7 @@ pub mod win_window {
         fn EnumWindows(lpEnumFunc: extern "system" fn(HWND, LPARAM) -> BOOL, lParam: LPARAM) -> BOOL;
         fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
         fn IsWindowVisible(hWnd: HWND) -> BOOL;
-        fn GetWindowTextLengthW(hWnd: HWND) -> i32;
+        fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
     }
 
     struct WindowFinder {
@@ -1943,10 +1871,16 @@ pub mod win_window {
             let mut pid: DWORD = 0;
             GetWindowThreadProcessId(hwnd, &mut pid);
             if pid == finder.target_pid && IsWindowVisible(hwnd) != 0 {
-                let title_len = GetWindowTextLengthW(hwnd);
-                if title_len > 0 {
-                    finder.found_visible = true;
-                    return 0;
+                let mut buf = [0u16; 512];
+                let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 512);
+                if len > 0 {
+                    let title = String::from_utf16_lossy(&buf[..len as usize]);
+                    let lower = title.to_ascii_lowercase();
+                    // Don't trigger on FML Early Display or splash screen
+                    if !lower.contains("early") && !lower.contains("fmlearlywindow") {
+                        finder.found_visible = true;
+                        return 0;
+                    }
                 }
             }
             1
@@ -2042,13 +1976,13 @@ pub fn auto_tune_options_for_max_fps(instance_dir: &Path) {
             }
         } else {
             let default_options = "\
-version:3955
+version:3465
 enableVsync:false
 maxFps:260
 renderDistance:14
 simulationDistance:10
 gamma:1.0
-graphicsMode:0
+graphicsMode:fast
 ao:true
 particles:2
 entityShadows:false
