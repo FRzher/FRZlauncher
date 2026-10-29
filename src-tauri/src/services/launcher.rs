@@ -1115,24 +1115,9 @@ impl Launcher {
 
         let mut game_args = Vec::new();
 
-        // 1. Base vanilla game arguments
-        if let Some(ref args_obj) = pkg.arguments {
-            let extracted_game = extract_matching_arguments(&args_obj.game, java_install.is_64_bit);
-            for s in extracted_game {
-                let resolved = resolve_placeholders(
-                    &s,
-                    &active_account.username,
-                    &active_account.uuid,
-                    &auth_token,
-                    &instance.game_version,
-                    &instance_dir,
-                    &assets_dir,
-                    &pkg.assets,
-                );
-                game_args.push(resolved);
-            }
-        } else if let Some(ref mc_args) = pkg.minecraft_arguments {
-            for s in mc_args.split_whitespace() {
+        if let Some(ref custom_mc_args) = custom_minecraft_args {
+            // Legacy loader (Forge <= 1.12.2): child version replaces vanilla minecraftArguments
+            for s in custom_mc_args.split_whitespace() {
                 let resolved = resolve_placeholders(
                     s,
                     &active_account.username,
@@ -1145,9 +1130,43 @@ impl Launcher {
                 );
                 game_args.push(resolved);
             }
+        } else {
+            // Modern or vanilla base game arguments
+            if let Some(ref args_obj) = pkg.arguments {
+                let extracted_game = extract_matching_arguments(&args_obj.game, java_install.is_64_bit);
+                for s in extracted_game {
+                    let resolved = resolve_placeholders(
+                        &s,
+                        &active_account.username,
+                        &active_account.uuid,
+                        &auth_token,
+                        &instance.game_version,
+                        &instance_dir,
+                        &assets_dir,
+                        &pkg.assets,
+                    );
+                    game_args.push(resolved);
+                }
+            } else if let Some(ref mc_args) = pkg.minecraft_arguments {
+                for s in mc_args.split_whitespace() {
+                    let resolved = resolve_placeholders(
+                        s,
+                        &active_account.username,
+                        &active_account.uuid,
+                        &auth_token,
+                        &instance.game_version,
+                        &instance_dir,
+                        &assets_dir,
+                        &pkg.assets,
+                    );
+                    game_args.push(resolved);
+                }
+            }
         }
 
-        // 2. Custom loader / Forge game arguments (append without dropping base args)
+        // 2. Custom loader / Forge 1.13+ game arguments (append to base arguments)
+        // Never deduplicate arguments because tokens such as version numbers ("1.20.1")
+        // legitimately appear in both base arguments (--version 1.20.1) and loader arguments (--fml.mcVersion 1.20.1)!
         if let Some(ref custom_g_args) = custom_game_args {
             let extracted_custom = extract_matching_arguments(custom_g_args, java_install.is_64_bit);
             for s in extracted_custom {
@@ -1161,27 +1180,7 @@ impl Launcher {
                     &assets_dir,
                     &pkg.assets,
                 );
-                if !game_args.contains(&resolved) {
-                    game_args.push(resolved);
-                }
-            }
-        }
-
-        if let Some(ref custom_mc_args) = custom_minecraft_args {
-            for s in custom_mc_args.split_whitespace() {
-                let resolved = resolve_placeholders(
-                    s,
-                    &active_account.username,
-                    &active_account.uuid,
-                    &auth_token,
-                    &instance.game_version,
-                    &instance_dir,
-                    &assets_dir,
-                    &pkg.assets,
-                );
-                if !game_args.contains(&resolved) {
-                    game_args.push(resolved);
-                }
+                game_args.push(resolved);
             }
         }
 
@@ -1731,6 +1730,8 @@ fn resolve_placeholders(
         .replace("${assets_index_name}", assets_index)
         .replace("${resolution_width}", "854")
         .replace("${resolution_height}", "480")
+        .replace("${clientid}", "frzlauncher")
+        .replace("${auth_xuid}", "0")
 }
 
 /// Check if an argument's rule array allows inclusion on the current system (Windows)
@@ -2302,6 +2303,43 @@ mod tests {
         assert!(module_path.contains("securejarhandler-2.1.10.jar"));
         assert!(module_path.contains("bootstraplauncher-1.1.2.jar"));
         assert!(module_path.contains(r"C:\FRZ\cache\libraries"));
+    }
+
+    #[test]
+    fn test_forge_game_arguments_preserves_version_value() {
+        // Vanilla args already contains --version 1.20.1
+        let mut game_args = vec![
+            "--username".to_string(),
+            "FrzherYT".to_string(),
+            "--version".to_string(),
+            "1.20.1".to_string(),
+        ];
+
+        // Forge custom game args also contains 1.20.1 as value for --fml.mcVersion
+        let forge_game_json = vec![
+            serde_json::json!("--launchTarget"),
+            serde_json::json!("forgeclient"),
+            serde_json::json!("--fml.forgeVersion"),
+            serde_json::json!("47.4.20"),
+            serde_json::json!("--fml.mcVersion"),
+            serde_json::json!("1.20.1"),
+            serde_json::json!("--fml.forgeGroup"),
+            serde_json::json!("net.minecraftforge"),
+            serde_json::json!("--fml.mcpVersion"),
+            serde_json::json!("20230612.114412"),
+        ];
+
+        let extracted = extract_matching_arguments(&forge_game_json, true);
+        for s in extracted {
+            game_args.push(s);
+        }
+
+        // Verify --fml.mcVersion is immediately followed by 1.20.1, NOT --fml.forgeGroup!
+        let mc_ver_idx = game_args.iter().position(|a| a == "--fml.mcVersion").unwrap();
+        assert_eq!(game_args[mc_ver_idx + 1], "1.20.1");
+
+        let forge_grp_idx = game_args.iter().position(|a| a == "--fml.forgeGroup").unwrap();
+        assert_eq!(game_args[forge_grp_idx + 1], "net.minecraftforge");
     }
 }
 
