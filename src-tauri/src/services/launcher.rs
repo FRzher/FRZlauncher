@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::models::{
-    AuthProvider, DownloadProgressPayload, GameLogEntry, LaunchStatus, LoaderType,
+    AuthProvider, DownloadProgressPayload, GameLogEntry, LaunchStatus, LoaderType, LoggingConfig,
 };
 use crate::services::{
     ChecksumType, CrashRepairService, DiscordService, Downloader, ElyByService, InstanceManager, JavaDetector,
@@ -335,6 +335,9 @@ impl Launcher {
         // 6. Handle Modloader Libraries (Fabric, Forge, NeoForge, Quilt)
         let mut custom_minecraft_args: Option<String> = None;
         let mut custom_game_args: Option<Vec<serde_json::Value>> = None;
+        let mut custom_jvm_args: Option<Vec<serde_json::Value>> = None;
+        let mut loader_logging: Option<LoggingConfig> = None;
+        let mut loader_profile_id: Option<String> = None;
 
         let main_class = match instance.loader_type {
             LoaderType::Fabric => {
@@ -436,11 +439,15 @@ impl Launcher {
                     if let Some(ref downloads) = lib.downloads {
                         if let Some(ref artifact) = downloads.artifact {
                             let lib_path = libraries_dir.join(&artifact.path);
-                            if !lib_path.exists() {
+                            if !lib_path.exists() || lib_path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+                                let mut dl_url = artifact.url.clone();
+                                if dl_url.trim().is_empty() {
+                                    dl_url = format!("https://maven.neoforged.net/releases/{}", artifact.path);
+                                }
                                 let dl_urls = ManifestService::resolve_library_download_urls(
                                     &lib.name,
                                     &artifact.path,
-                                    Some(&artifact.url),
+                                    Some(&dl_url),
                                 );
                                 download_tasks.push(LibDownloadTask {
                                     urls: dl_urls,
@@ -453,7 +460,7 @@ impl Launcher {
                         }
                     } else if let Some(rel_path) = ManifestService::maven_to_path(&lib.name) {
                         let lib_path = libraries_dir.join(&rel_path);
-                        if !lib_path.exists() {
+                        if !lib_path.exists() || lib_path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
                             let dl_urls = ManifestService::resolve_library_download_urls(
                                 &lib.name,
                                 &rel_path,
@@ -473,7 +480,35 @@ impl Launcher {
                 custom_minecraft_args = neoforge_profile.minecraft_arguments;
                 if let Some(ref args) = neoforge_profile.arguments {
                     custom_game_args = Some(args.game.clone());
+                    custom_jvm_args = Some(args.jvm.clone());
+
+                    let extracted_jvm = extract_matching_arguments(&args.jvm, java_install.is_64_bit);
+                    for jvm_arg in &extracted_jvm {
+                        for rel in extract_library_paths_from_jvm_arg(jvm_arg) {
+                            let target = libraries_dir.join(&rel);
+                            let needs_dl = !target.exists() || target.metadata().map(|m| m.len() == 0).unwrap_or(true);
+                            if needs_dl && !download_tasks.iter().any(|t| t.path == target) {
+                                let mut dl_urls = ManifestService::resolve_library_download_urls(&rel, &rel, None);
+                                let neoforge_url = format!("https://maven.neoforged.net/releases/{}", rel);
+                                if !dl_urls.contains(&neoforge_url) {
+                                    dl_urls.push(neoforge_url);
+                                }
+                                let bmcl_url = format!("https://bmclapi2.bangbang93.com/maven/{}", rel);
+                                if !dl_urls.contains(&bmcl_url) {
+                                    dl_urls.push(bmcl_url);
+                                }
+                                download_tasks.push(LibDownloadTask {
+                                    urls: dl_urls,
+                                    path: target.clone(),
+                                    sha1: None,
+                                    name: rel,
+                                });
+                            }
+                        }
+                    }
                 }
+                loader_logging = neoforge_profile.logging.clone();
+                loader_profile_id = Some(neoforge_profile.id.clone());
 
                 neoforge_profile.main_class
             }
@@ -498,7 +533,7 @@ impl Launcher {
                     if let Some(ref downloads) = lib.downloads {
                         if let Some(ref artifact) = downloads.artifact {
                             let lib_path = libraries_dir.join(&artifact.path);
-                            if !lib_path.exists() {
+                            if !lib_path.exists() || lib_path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
                                 let mut dl_url = artifact.url.clone();
                                 if dl_url.trim().is_empty() {
                                     if artifact.path.contains("minecraftforge/forge") {
@@ -551,7 +586,7 @@ impl Launcher {
 
                             if let Some(artifact) = native_artifact {
                                 let native_path = libraries_dir.join(&artifact.path);
-                                if !native_path.exists() {
+                                if !native_path.exists() || native_path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
                                     let dl_urls = ManifestService::resolve_library_download_urls(
                                         &lib.name,
                                         &artifact.path,
@@ -569,7 +604,7 @@ impl Launcher {
                         }
                     } else if let Some(rel_path) = ManifestService::maven_to_path(&lib.name) {
                         let lib_path = libraries_dir.join(&rel_path);
-                        if !lib_path.exists() {
+                        if !lib_path.exists() || lib_path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
                             let dl_urls = ManifestService::resolve_library_download_urls(
                                 &lib.name,
                                 &rel_path,
@@ -589,7 +624,63 @@ impl Launcher {
                 custom_minecraft_args = forge_profile.minecraft_arguments;
                 if let Some(ref args) = forge_profile.arguments {
                     custom_game_args = Some(args.game.clone());
+                    custom_jvm_args = Some(args.jvm.clone());
+
+                    let extracted_jvm = extract_matching_arguments(&args.jvm, java_install.is_64_bit);
+                    for jvm_arg in &extracted_jvm {
+                        for rel in extract_library_paths_from_jvm_arg(jvm_arg) {
+                            let target = libraries_dir.join(&rel);
+                            let needs_dl = !target.exists() || target.metadata().map(|m| m.len() == 0).unwrap_or(true);
+                            if needs_dl && !download_tasks.iter().any(|t| t.path == target) {
+                                let mut dl_urls = ManifestService::resolve_library_download_urls(&rel, &rel, None);
+                                let forge_url = format!("https://maven.minecraftforge.net/{}", rel);
+                                if !dl_urls.contains(&forge_url) {
+                                    dl_urls.push(forge_url);
+                                }
+                                let bmcl_url = format!("https://bmclapi2.bangbang93.com/maven/{}", rel);
+                                if !dl_urls.contains(&bmcl_url) {
+                                    dl_urls.push(bmcl_url);
+                                }
+                                let neoforge_url = format!("https://maven.neoforged.net/releases/{}", rel);
+                                if !dl_urls.contains(&neoforge_url) {
+                                    dl_urls.push(neoforge_url);
+                                }
+                                download_tasks.push(LibDownloadTask {
+                                    urls: dl_urls,
+                                    path: target.clone(),
+                                    sha1: None,
+                                    name: rel,
+                                });
+                            }
+                        }
+                    }
                 }
+
+                // Ensure Forge core jar (universal and client.jar) is present for modern Forge (1.13+)
+                if let Some(ref forge_ver) = instance.loader_version {
+                    let forge_rel_dir = format!("net/minecraftforge/forge/{}-{}", instance.game_version, forge_ver);
+                    let forge_base_dir = libraries_dir.join(&forge_rel_dir);
+                    let universal_jar = forge_base_dir.join(format!("forge-{}-{}-universal.jar", instance.game_version, forge_ver));
+                    let client_jar = forge_base_dir.join(format!("forge-{}-{}-client.jar", instance.game_version, forge_ver));
+
+                    let universal_missing = !universal_jar.exists() || universal_jar.metadata().map(|m| m.len() == 0).unwrap_or(true);
+                    let client_missing = !client_jar.exists() || client_jar.metadata().map(|m| m.len() == 0).unwrap_or(true);
+
+                    if universal_missing && client_missing {
+                        let dl_urls = vec![
+                            format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{}-{}/forge-{}-{}-universal.jar", instance.game_version, forge_ver, instance.game_version, forge_ver),
+                            format!("https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{}-{}/forge-{}-{}-universal.jar", instance.game_version, forge_ver, instance.game_version, forge_ver),
+                        ];
+                        download_tasks.push(LibDownloadTask {
+                            urls: dl_urls,
+                            path: universal_jar.clone(),
+                            sha1: None,
+                            name: format!("net.minecraftforge:forge:{}-{}:universal", instance.game_version, forge_ver),
+                        });
+                    }
+                }
+                loader_logging = forge_profile.logging.clone();
+                loader_profile_id = Some(forge_profile.id.clone());
 
                 forge_profile.main_class
             }
@@ -653,6 +744,24 @@ impl Launcher {
 
             for h in join_handles {
                 let _ = h.await;
+            }
+        }
+
+        // For Forge 1.13+, ensure client.jar exists if universal.jar is downloaded
+        if instance.loader_type == LoaderType::Forge {
+            if let Some(ref forge_ver) = instance.loader_version {
+                let forge_dir = libraries_dir
+                    .join("net")
+                    .join("minecraftforge")
+                    .join("forge")
+                    .join(format!("{}-{}", instance.game_version, forge_ver));
+                let universal_jar = forge_dir.join(format!("forge-{}-{}-universal.jar", instance.game_version, forge_ver));
+                let client_jar = forge_dir.join(format!("forge-{}-{}-client.jar", instance.game_version, forge_ver));
+                if universal_jar.exists() && (!client_jar.exists() || client_jar.metadata().map(|m| m.len() == 0).unwrap_or(true)) {
+                    let _ = std::fs::copy(&universal_jar, &client_jar);
+                } else if client_jar.exists() && (!universal_jar.exists() || universal_jar.metadata().map(|m| m.len() == 0).unwrap_or(true)) {
+                    let _ = std::fs::copy(&client_jar, &universal_jar);
+                }
             }
         }
 
@@ -945,8 +1054,58 @@ impl Launcher {
             }
         }
 
-        jvm_args.push("-cp".to_string());
-        jvm_args.push(classpath_str);
+        // Logging configuration (-Dlog4j.configurationFile=...)
+        let logging_opt = loader_logging.as_ref().or(pkg.logging.as_ref());
+        if let Some(logging_cfg) = logging_opt {
+            if let Some(client_log) = &logging_cfg.client {
+                if let Some(arg_pattern) = &client_log.argument {
+                    if let Some(file_info) = &client_log.file {
+                        let log_config_dir = assets_dir.join("log_configs");
+                        let _ = fs::create_dir_all(&log_config_dir);
+                        let log_config_file = log_config_dir.join(&file_info.id);
+                        if !log_config_file.exists() || log_config_file.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+                            let _ = self.downloader.download_file(
+                                &file_info.url,
+                                &log_config_file,
+                                ChecksumType::Sha1(file_info.sha1.clone()),
+                                None,
+                                None,
+                            ).await;
+                        }
+                        if log_config_file.exists() {
+                            let log_arg = arg_pattern.replace("${path}", &log_config_file.to_string_lossy());
+                            if !jvm_args.contains(&log_arg) {
+                                jvm_args.push(log_arg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Loader / Forge custom JVM arguments (module-path, modular flags, libraryDirectory, etc.)
+        let version_name = loader_profile_id.as_deref().unwrap_or(&instance.game_version);
+        if let Some(ref custom_j_args) = custom_jvm_args {
+            let extracted = extract_matching_arguments(custom_j_args, java_install.is_64_bit);
+            for arg_raw in extracted {
+                let resolved = resolve_jvm_placeholders(
+                    &arg_raw,
+                    &libraries_dir,
+                    &natives_dir,
+                    version_name,
+                    &classpath_str,
+                    Some(&instance_dir),
+                    Some(&assets_dir),
+                );
+                jvm_args.push(resolved);
+            }
+        }
+
+        let has_cp = jvm_args.iter().any(|a| a == "-cp" || a == "-classpath");
+        if !has_cp {
+            jvm_args.push("-cp".to_string());
+            jvm_args.push(classpath_str);
+        }
 
         // 9. Build Game Arguments
         let auth_token = self
@@ -958,20 +1117,19 @@ impl Launcher {
 
         // 1. Base vanilla game arguments
         if let Some(ref args_obj) = pkg.arguments {
-            for arg_val in &args_obj.game {
-                if let Some(s) = arg_val.as_str() {
-                    let resolved = resolve_placeholders(
-                        s,
-                        &active_account.username,
-                        &active_account.uuid,
-                        &auth_token,
-                        &instance.game_version,
-                        &instance_dir,
-                        &assets_dir,
-                        &pkg.assets,
-                    );
-                    game_args.push(resolved);
-                }
+            let extracted_game = extract_matching_arguments(&args_obj.game, java_install.is_64_bit);
+            for s in extracted_game {
+                let resolved = resolve_placeholders(
+                    &s,
+                    &active_account.username,
+                    &active_account.uuid,
+                    &auth_token,
+                    &instance.game_version,
+                    &instance_dir,
+                    &assets_dir,
+                    &pkg.assets,
+                );
+                game_args.push(resolved);
             }
         } else if let Some(ref mc_args) = pkg.minecraft_arguments {
             for s in mc_args.split_whitespace() {
@@ -991,21 +1149,20 @@ impl Launcher {
 
         // 2. Custom loader / Forge game arguments (append without dropping base args)
         if let Some(ref custom_g_args) = custom_game_args {
-            for arg_val in custom_g_args {
-                if let Some(s) = arg_val.as_str() {
-                    let resolved = resolve_placeholders(
-                        s,
-                        &active_account.username,
-                        &active_account.uuid,
-                        &auth_token,
-                        &instance.game_version,
-                        &instance_dir,
-                        &assets_dir,
-                        &pkg.assets,
-                    );
-                    if !game_args.contains(&resolved) {
-                        game_args.push(resolved);
-                    }
+            let extracted_custom = extract_matching_arguments(custom_g_args, java_install.is_64_bit);
+            for s in extracted_custom {
+                let resolved = resolve_placeholders(
+                    &s,
+                    &active_account.username,
+                    &active_account.uuid,
+                    &auth_token,
+                    &instance.game_version,
+                    &instance_dir,
+                    &assets_dir,
+                    &pkg.assets,
+                );
+                if !game_args.contains(&resolved) {
+                    game_args.push(resolved);
                 }
             }
         }
@@ -1576,6 +1733,177 @@ fn resolve_placeholders(
         .replace("${resolution_height}", "480")
 }
 
+/// Check if an argument's rule array allows inclusion on the current system (Windows)
+pub fn evaluate_arg_rules(rules: &[serde_json::Value], is_64_bit: bool) -> bool {
+    if rules.is_empty() {
+        return true;
+    }
+
+    let mut allowed = false;
+    for rule in rules {
+        if let Some(rule_obj) = rule.as_object() {
+            let action = rule_obj.get("action").and_then(|a| a.as_str()).unwrap_or("allow");
+            let mut matches = true;
+
+            // Check OS rule
+            if let Some(os_val) = rule_obj.get("os") {
+                if let Some(os_obj) = os_val.as_object() {
+                    // Check OS name
+                    if let Some(name) = os_obj.get("name").and_then(|n| n.as_str()) {
+                        let current_os = if cfg!(target_os = "windows") {
+                            "windows"
+                        } else if cfg!(target_os = "macos") {
+                            "osx"
+                        } else {
+                            "linux"
+                        };
+                        if name != current_os {
+                            matches = false;
+                        }
+                    }
+
+                    // Check OS arch
+                    if matches {
+                        if let Some(arch) = os_obj.get("arch").and_then(|a| a.as_str()) {
+                            if arch == "x86" && is_64_bit {
+                                matches = false;
+                            } else if (arch == "x64" || arch == "x86_64") && !is_64_bit {
+                                matches = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check Features rule
+            if matches {
+                if let Some(features_val) = rule_obj.get("features") {
+                    if let Some(features_obj) = features_val.as_object() {
+                        if !features_obj.is_empty() {
+                            matches = false;
+                        }
+                    }
+                }
+            }
+
+            if matches {
+                allowed = action == "allow";
+            }
+        }
+    }
+    allowed
+}
+
+/// Extract string arguments from JSON argument array, supporting both raw strings and rule-based JSON objects
+pub fn extract_matching_arguments(raw_args: &[serde_json::Value], is_64_bit: bool) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for arg_val in raw_args {
+        match arg_val {
+            serde_json::Value::String(s) => {
+                result.push(s.clone());
+            }
+            serde_json::Value::Object(map) => {
+                let allowed = if let Some(rules_val) = map.get("rules") {
+                    if let Some(rules_arr) = rules_val.as_array() {
+                        evaluate_arg_rules(rules_arr, is_64_bit)
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+
+                if allowed {
+                    if let Some(val) = map.get("value") {
+                        match val {
+                            serde_json::Value::String(s) => result.push(s.clone()),
+                            serde_json::Value::Array(arr) => {
+                                for item in arr {
+                                    if let Some(s) = item.as_str() {
+                                        result.push(s.to_string());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else if let Some(val) = map.get("values") {
+                        if let Some(arr) = val.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    result.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
+/// Replace placeholders for loader / JVM arguments:
+/// ${library_directory} -> libraries_dir path
+/// ${classpath_separator} -> ';' (Windows) / ':' (Unix)
+/// ${version_name} -> forge_profile.id or instance.game_version
+/// ${natives_directory} -> natives_dir path
+/// ${launcher_name} -> FRZlauncher
+/// ${launcher_version} -> 2.0.0
+/// ${classpath} -> classpath_str
+/// ${game_directory} -> instance_dir path
+/// ${assets_root} -> assets_dir path
+pub fn resolve_jvm_placeholders(
+    template: &str,
+    libraries_dir: &Path,
+    natives_dir: &Path,
+    version_name: &str,
+    classpath_str: &str,
+    instance_dir: Option<&Path>,
+    assets_dir: Option<&Path>,
+) -> String {
+    let cp_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let lib_dir_str = libraries_dir.to_string_lossy();
+    let nat_dir_str = natives_dir.to_string_lossy();
+    let inst_dir_str = instance_dir.map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let assets_dir_str = assets_dir.map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+
+    template
+        .replace("${library_directory}", &lib_dir_str)
+        .replace("${classpath_separator}", cp_sep)
+        .replace("${version_name}", version_name)
+        .replace("${natives_directory}", &nat_dir_str)
+        .replace("${launcher_name}", "FRZlauncher")
+        .replace("${launcher_version}", "2.0.0")
+        .replace("${classpath}", classpath_str)
+        .replace("${game_directory}", &inst_dir_str)
+        .replace("${assets_root}", &assets_dir_str)
+        .replace("${user_type}", "mojang")
+}
+
+/// Extract library relative paths mentioned in JVM arguments (e.g. from -p ${library_directory}/...jar)
+pub fn extract_library_paths_from_jvm_arg(arg: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    if !arg.contains("${library_directory}/") {
+        return paths;
+    }
+
+    let normalized = arg.replace("${classpath_separator}", ";");
+    for part in normalized.split(&[';', ':'][..]) {
+        if let Some(idx) = part.find("${library_directory}/") {
+            let rel = &part[idx + "${library_directory}/".len()..];
+            let rel = rel.trim_matches(|c| c == '"' || c == '\'' || c == ' ');
+            if !rel.is_empty() && rel.ends_with(".jar") {
+                paths.push(rel.to_string());
+            }
+        }
+    }
+
+    paths
+}
+
 fn parse_log_level(line: &str) -> String {
     if line.contains("/ERROR") || line.contains("Exception") || line.contains("Error:") {
         "ERROR".to_string()
@@ -1798,6 +2126,182 @@ mod tests {
         assert!(!is_window_ready_signal("[12:00:00] [Client thread/INFO]: Setting user: Steve"));
         assert!(!is_window_ready_signal("[12:00:00] [main/INFO]: Loading Minecraft 1.20.1 with Fabric Loader 0.16.0"));
         assert!(!is_window_ready_signal("[12:00:00] [main/INFO]: SpongePowered MIXIN Subsystem Version=0.8.5"));
+    }
+
+    #[test]
+    fn test_resolve_jvm_placeholders() {
+        let lib_dir = Path::new(r"C:\Users\User\.frz\libraries");
+        let nat_dir = Path::new(r"C:\Users\User\.frz\natives");
+        let inst_dir = Path::new(r"C:\Users\User\.frz\instances\inst1");
+        let assets_dir = Path::new(r"C:\Users\User\.frz\assets");
+        let cp_str = r"C:\Users\User\.frz\libraries\client.jar;C:\Users\User\.frz\libraries\forge.jar";
+
+        let template_lib = "-DlibraryDirectory=${library_directory}";
+        let res_lib = resolve_jvm_placeholders(
+            template_lib,
+            lib_dir,
+            nat_dir,
+            "1.20.1-forge-47.4.20",
+            cp_str,
+            Some(inst_dir),
+            Some(assets_dir),
+        );
+        assert_eq!(res_lib, r"-DlibraryDirectory=C:\Users\User\.frz\libraries");
+
+        let cp_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        let template_mod = "${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar${classpath_separator}${library_directory}/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar";
+        let res_mod = resolve_jvm_placeholders(
+            template_mod,
+            lib_dir,
+            nat_dir,
+            "1.20.1-forge-47.4.20",
+            cp_str,
+            Some(inst_dir),
+            Some(assets_dir),
+        );
+        let expected_mod = format!(
+            r"C:\Users\User\.frz\libraries/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar{}C:\Users\User\.frz\libraries/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar",
+            cp_sep
+        );
+        assert_eq!(res_mod, expected_mod);
+
+        let template_brand = "-Dminecraft.launcher.brand=${launcher_name} -Dversion=${version_name}";
+        let res_brand = resolve_jvm_placeholders(
+            template_brand,
+            lib_dir,
+            nat_dir,
+            "1.20.1-forge-47.4.20",
+            cp_str,
+            Some(inst_dir),
+            Some(assets_dir),
+        );
+        assert_eq!(res_brand, "-Dminecraft.launcher.brand=FRZlauncher -Dversion=1.20.1-forge-47.4.20");
+    }
+
+    #[test]
+    fn test_extract_matching_arguments_strings_and_rules() {
+        let raw_args = vec![
+            serde_json::json!("-Dsimple.arg=true"),
+            serde_json::json!({
+                "rules": [
+                    { "action": "allow", "os": { "name": "windows" } }
+                ],
+                "value": "-XX:HeapDumpPath=dump.hprof"
+            }),
+            serde_json::json!({
+                "rules": [
+                    { "action": "allow", "os": { "name": "osx" } }
+                ],
+                "value": ["-XstartOnFirstThread"]
+            }),
+            serde_json::json!({
+                "rules": [
+                    { "action": "allow", "features": { "is_demo_user": true } }
+                ],
+                "value": "--demo"
+            }),
+            serde_json::json!({
+                "rules": [
+                    { "action": "allow", "os": { "arch": "x86" } }
+                ],
+                "value": "-Xss1M"
+            }),
+            serde_json::json!({
+                "rules": [
+                    { "action": "allow" }
+                ],
+                "value": ["--multi-val-1", "--multi-val-2"]
+            }),
+        ];
+
+        let extracted_64 = extract_matching_arguments(&raw_args, true);
+        assert!(extracted_64.contains(&"-Dsimple.arg=true".to_string()));
+        if cfg!(target_os = "windows") {
+            assert!(extracted_64.contains(&"-XX:HeapDumpPath=dump.hprof".to_string()));
+            assert!(!extracted_64.contains(&"-XstartOnFirstThread".to_string()));
+            assert!(!extracted_64.contains(&"-Xss1M".to_string())); // 64-bit should skip x86
+        }
+        assert!(!extracted_64.contains(&"--demo".to_string()));
+        assert!(extracted_64.contains(&"--multi-val-1".to_string()));
+        assert!(extracted_64.contains(&"--multi-val-2".to_string()));
+
+        let extracted_32 = extract_matching_arguments(&raw_args, false);
+        if cfg!(target_os = "windows") {
+            assert!(extracted_32.contains(&"-Xss1M".to_string())); // 32-bit should include x86
+        }
+    }
+
+    #[test]
+    fn test_extract_library_paths_from_jvm_arg() {
+        let arg = "-p ${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar${classpath_separator}${library_directory}/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar;${library_directory}/org/ow2/asm/asm/9.9.1/asm-9.9.1.jar";
+        let paths = extract_library_paths_from_jvm_arg(arg);
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0], "cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar");
+        assert_eq!(paths[1], "cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar");
+        assert_eq!(paths[2], "org/ow2/asm/asm/9.9.1/asm-9.9.1.jar");
+    }
+
+    #[test]
+    fn test_forge_jvm_arguments_integration() {
+        let forge_jvm_json = vec![
+            serde_json::json!("-Djava.net.preferIPv6Addresses=system"),
+            serde_json::json!("-DignoreList=bootstraplauncher,securejarhandler,${version_name}.jar"),
+            serde_json::json!("-DlibraryDirectory=${library_directory}"),
+            serde_json::json!("-p"),
+            serde_json::json!("${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar${classpath_separator}${library_directory}/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar"),
+            serde_json::json!("--add-modules"),
+            serde_json::json!("ALL-MODULE-PATH"),
+            serde_json::json!("--add-opens"),
+            serde_json::json!("java.base/java.util.jar=cpw.mods.securejarhandler"),
+            serde_json::json!("--add-opens"),
+            serde_json::json!("java.base/java.lang.invoke=cpw.mods.securejarhandler"),
+            serde_json::json!("--add-exports"),
+            serde_json::json!("java.base/sun.security.util=cpw.mods.securejarhandler"),
+            serde_json::json!({
+                "rules": [
+                    { "action": "allow", "os": { "name": "osx" } }
+                ],
+                "value": "-XstartOnFirstThread"
+            }),
+        ];
+
+        let extracted = extract_matching_arguments(&forge_jvm_json, true);
+        let lib_dir = Path::new(r"C:\FRZ\cache\libraries");
+        let nat_dir = Path::new(r"C:\FRZ\cache\natives");
+        let inst_dir = Path::new(r"C:\FRZ\instances\forge120");
+        let cp_str = r"C:\FRZ\cache\libraries\client.jar";
+
+        let mut resolved_args = Vec::new();
+        for arg in &extracted {
+            resolved_args.push(resolve_jvm_placeholders(
+                arg,
+                lib_dir,
+                nat_dir,
+                "1.20.1-forge-47.4.20",
+                cp_str,
+                Some(inst_dir),
+                None,
+            ));
+        }
+
+        assert!(resolved_args.contains(&"-DlibraryDirectory=C:\\FRZ\\cache\\libraries".to_string()));
+        assert!(resolved_args.contains(&"-DignoreList=bootstraplauncher,securejarhandler,1.20.1-forge-47.4.20.jar".to_string()));
+        assert!(resolved_args.contains(&"-p".to_string()));
+        assert!(resolved_args.contains(&"--add-modules".to_string()));
+        assert!(resolved_args.contains(&"ALL-MODULE-PATH".to_string()));
+        assert!(resolved_args.contains(&"java.base/java.util.jar=cpw.mods.securejarhandler".to_string()));
+        assert!(resolved_args.contains(&"java.base/java.lang.invoke=cpw.mods.securejarhandler".to_string()));
+        assert!(resolved_args.contains(&"java.base/sun.security.util=cpw.mods.securejarhandler".to_string()));
+        if cfg!(target_os = "windows") {
+            assert!(!resolved_args.contains(&"-XstartOnFirstThread".to_string()));
+        }
+
+        // Verify module path contains securejarhandler
+        let p_idx = resolved_args.iter().position(|a| a == "-p").unwrap();
+        let module_path = &resolved_args[p_idx + 1];
+        assert!(module_path.contains("securejarhandler-2.1.10.jar"));
+        assert!(module_path.contains("bootstraplauncher-1.1.2.jar"));
+        assert!(module_path.contains(r"C:\FRZ\cache\libraries"));
     }
 }
 

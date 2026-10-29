@@ -41,6 +41,32 @@ pub struct VersionPackage {
     pub main_class: String,
     #[serde(rename = "javaVersion", default)]
     pub java_version: Option<JavaVersionRequirement>,
+    #[serde(default)]
+    pub logging: Option<LoggingConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default)]
+    pub client: Option<LoggingClient>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingClient {
+    #[serde(default)]
+    pub argument: Option<String>,
+    #[serde(default)]
+    pub file: Option<LoggingFile>,
+    #[serde(rename = "type", default)]
+    pub log_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingFile {
+    pub id: String,
+    pub sha1: String,
+    pub size: u64,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +208,8 @@ pub struct ForgeProfile {
     pub arguments: Option<VersionArguments>,
     #[serde(default)]
     pub libraries: Vec<LibraryEntry>,
+    #[serde(default)]
+    pub logging: Option<LoggingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
